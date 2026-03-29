@@ -4128,6 +4128,8 @@ func (b *LocalBackend) CurrentUserForTest() (ipn.WindowsUserID, ipnauth.Actor) {
 	return b.pm.CurrentUserID(), b.currentUser
 }
 
+// CheckPrefs validates the provided user modifiable settings for correctness
+// and returns an error if they are invalid for the current backend.
 func (b *LocalBackend) CheckPrefs(p *ipn.Prefs) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -4170,8 +4172,17 @@ func (b *LocalBackend) checkPrefsLocked(p *ipn.Prefs) error {
 	if err := checkAdvertiseRoutes(p); err != nil {
 		errs = append(errs, err)
 	}
+	if fn, ok := HookCheckPosturePrefs.GetOk(); ok {
+		if err := fn(b.PolicyClient(), p); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
+
+// HookCheckPosturePrefs is an optional hook for validating that posture
+// checking can be enabled on this backend.
+var HookCheckPosturePrefs feature.Hook[func(policyclient.Client, *ipn.Prefs) error]
 
 func (b *LocalBackend) checkSSHPrefsLocked(p *ipn.Prefs) error {
 	if !p.RunSSH {

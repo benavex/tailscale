@@ -58,12 +58,11 @@ import (
 	"fmt"
 	"strings"
 
-	"tailscale.com/types/logger"
 	"tailscale.com/util/syspolicy/policyclient"
 )
 
 // GetSerialNumber returns the platform serial sumber as reported by IOKit.
-func GetSerialNumbers(policyclient.Client, logger.Logf) ([]string, error) {
+func GetSerialNumbers(policyclient.Client) ([]string, error) {
 	csn := C.getSerialNumber()
 	serialNumber := C.GoString(csn)
 

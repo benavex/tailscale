@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"testing"
 
-	"tailscale.com/types/logger"
 	"tailscale.com/util/cibuild"
 	"tailscale.com/util/syspolicy/policyclient"
 )
@@ -21,7 +20,7 @@ func TestGetSerialNumberMac(t *testing.T) {
 		t.Skip()
 	}
 
-	sns, err := GetSerialNumbers(policyclient.NoPolicyClient{}, logger.Discard)
+	sns, err := GetSerialNumbers(policyclient.NoPolicyClient{})
 	if err != nil {
 		t.Fatalf("failed to get serial number: %s", err)
 	}

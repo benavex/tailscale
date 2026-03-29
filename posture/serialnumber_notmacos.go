@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/digitalocean/go-smbios/smbios"
-	"tailscale.com/types/logger"
 	"tailscale.com/util/syspolicy/policyclient"
 )
 
@@ -72,7 +71,7 @@ func init() {
 	numOfTables = len(validTables)
 }
 
-func GetSerialNumbers(polc policyclient.Client, logf logger.Logf) ([]string, error) {
+func GetSerialNumbers(polc policyclient.Client) ([]string, error) {
 	// Find SMBIOS data in operating system-specific location.
 	rc, _, err := smbios.Stream()
 	if err != nil {

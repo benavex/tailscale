@@ -8,8 +8,14 @@ package posture
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"runtime"
 
+	"tailscale.com/health"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnext"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/posture"
@@ -17,13 +23,46 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/policyclient"
 	"tailscale.com/util/syspolicy/ptype"
 )
 
 func init() {
 	ipnext.RegisterExtension("posture", newExtension)
 	ipnlocal.RegisterC2N("GET /posture/identity", handleC2NPostureIdentityGet)
+	ipnlocal.HookCheckPosturePrefs.Set(checkPosturePrefs)
 }
+
+// getSerialNumbers is an alias to allow for testing.
+var getSerialNumbers = posture.GetSerialNumbers
+
+// checkPosturePrefs validates that the backend is able to enable
+// posture checking.
+func checkPosturePrefs(client policyclient.Client, p *ipn.Prefs) error {
+	if !p.PostureChecking {
+		return nil
+	}
+
+	_, err := getSerialNumbers(client)
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("Unable to enable posture checking; tailscaled may need to run as root.")
+	} else if errors.Is(err, errors.ErrUnsupported) {
+		return fmt.Errorf("Unable to enable posture checking; not supported on %s", runtime.GOOS)
+	} else if err != nil {
+		return fmt.Errorf("Unable to enable posture checking; error: %w", err)
+	}
+
+	return nil
+}
+
+var postureSerialWarnable = health.Register(&health.Warnable{
+	Code:     "posture-checking-serial-collection-failed",
+	Title:    "Device Posture: serial number collection failed",
+	Severity: health.SeverityMedium,
+	Text: func(args health.Args) string {
+		return fmt.Sprintf("Could not collect device serial numbers for posture checking. (%v)", args[health.ArgError])
+	},
+})
 
 func newExtension(logf logger.Logf, b ipnext.SafeBackend) (ipnext.Extension, error) {
 	e := &extension{
@@ -70,9 +109,12 @@ func handleC2NPostureIdentityGet(b *ipnlocal.LocalBackend, w http.ResponseWriter
 	}
 
 	if choice.ShouldEnable(b.Prefs().PostureChecking()) {
-		res.SerialNumbers, err = posture.GetSerialNumbers(b.PolicyClient(), e.logf)
+		res.SerialNumbers, err = posture.GetSerialNumbers(b.PolicyClient())
 		if err != nil {
 			e.logf("c2n: GetSerialNumbers returned error: %v", err)
+			b.HealthTracker().SetUnhealthy(postureSerialWarnable, health.Args{health.ArgError: err.Error()})
+		} else {
+			b.HealthTracker().SetHealthy(postureSerialWarnable)
 		}
 
 		// TODO(tailscale/corp#21371, 2024-07-10): once this has landed in a stable release

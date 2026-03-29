@@ -12,12 +12,12 @@ package posture
 
 import (
 	"errors"
+	"fmt"
 
-	"tailscale.com/types/logger"
 	"tailscale.com/util/syspolicy/policyclient"
 )
 
 // GetSerialNumber returns client machine serial number(s).
-func GetSerialNumbers(polc policyclient.Client, _ logger.Logf) ([]string, error) {
-	return nil, errors.New("not implemented")
+func GetSerialNumbers(polc policyclient.Client) ([]string, error) {
+	return nil, fmt.Errorf("not implemented: %w", errors.ErrUnsupported)
 }
