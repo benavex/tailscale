@@ -1570,6 +1570,11 @@ func (b *LocalBackend) PeerCaps(src netip.Addr) tailcfg.PeerCapMap {
 	return b.currentNode().PeerCaps(src)
 }
 
+// Peers returns all the current peers in an undefined order.
+func (b *LocalBackend) Peers() []tailcfg.NodeView {
+	return b.currentNode().Peers()
+}
+
 func (b *LocalBackend) GetFilterForTest() *filter.Filter {
 	testenv.AssertInTest()
 	nb := b.currentNode()
