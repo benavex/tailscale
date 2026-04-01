@@ -21,6 +21,7 @@ import (
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/util/mak"
@@ -86,7 +87,14 @@ type Client struct {
 	Logf logger.Logf
 
 	// These elements are read-only after initialization.
-	b LocalBackend
+	b      LocalBackend
+	cancel context.CancelFunc
+
+	// The mutex protects the following elements.
+	mu     syncs.Mutex
+	report *Report
+	nids   map[key.NodePublic]tailcfg.NodeID
+	flows  map[key.NodePublic]ipnstate.PeerStatusLite
 }
 
 // LocalBackend is implemented by [ipnlocal.LocalBackend].
@@ -94,6 +102,7 @@ type LocalBackend interface {
 	NetMap() *netmap.NetworkMap
 	Peers() []tailcfg.NodeView
 	Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType, size int) (*ipnstate.PingResult, error)
+	Status() *ipnstate.Status
 	WatchNotifications(ctx context.Context, mask ipn.NotifyWatchOpt, onWatchAdded func(), fn func(roNotify *ipn.Notify) (keepGoing bool))
 	WhoIs(proto string, ipp netip.AddrPort) (n tailcfg.NodeView, u tailcfg.UserProfile, ok bool)
 }
@@ -318,4 +327,26 @@ AllowedIPs:
 		routes = append(routes, pfx)
 	}
 	return routes
+}
+
+// Start registers the client the [ipnlocal.LocalBackend]’s IPN bus
+// to bootstrap with the initial network map and to watch for traffic flows.
+func (c *Client) Start(ctx context.Context) {
+	ctx, c.cancel = context.WithCancel(ctx)
+	opts := ipn.NotifyInitialNetMap | ipn.NotifyWatchEngineUpdates | ipn.NotifyRateLimit
+	c.b.WatchNotifications(ctx, opts, nil, func(n *ipn.Notify) bool {
+		if n.NetMap != nil {
+			c.init(n.NetMap)
+		}
+		if n.Engine != nil {
+			c.watch(n.Engine.LivePeers)
+		}
+		return true
+	})
+}
+
+// Close implements the [io.Closer] interface.
+func (c *Client) Close() error {
+	c.cancel()
+	return nil
 }
