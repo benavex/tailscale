@@ -34,6 +34,7 @@ import (
 	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/ipn/routecheck"
 	"tailscale.com/net/netutil"
 	"tailscale.com/net/udprelay/status"
 	"tailscale.com/paths"
@@ -1040,6 +1041,17 @@ func (lc *Client) PingWithOpts(ctx context.Context, ip netip.Addr, pingtype tail
 // for its response.
 func (lc *Client) Ping(ctx context.Context, ip netip.Addr, pingtype tailcfg.PingType) (*ipnstate.PingResult, error) {
 	return lc.PingWithOpts(ctx, ip, pingtype, PingOpts{})
+}
+
+// RouteCheck performs a routecheck probe to the provided IPs and waits for its report.
+func (lc *Client) RouteCheck(ctx context.Context, force bool) (*routecheck.Report, error) {
+	v := url.Values{}
+	v.Set("force", strconv.FormatBool(force))
+	body, err := lc.send(ctx, "POST", "/localapi/v0/routecheck?"+v.Encode(), 200, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error %w: %s", err, body)
+	}
+	return decodeJSON[*routecheck.Report](body)
 }
 
 // DisconnectControl shuts down all connections to control, thus making control consider this node inactive. This can be

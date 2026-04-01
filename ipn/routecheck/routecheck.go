@@ -7,8 +7,10 @@ package routecheck
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
+	"maps"
 	"math/rand/v2"
 	"net/netip"
 	"slices"
@@ -24,28 +26,53 @@ import (
 	"tailscale.com/util/mak"
 )
 
+// Nodeset is a set of nodes keyed by node ID, so duplicates are easily detected.
+// To prevent stuttering, it encodes itself as an array.
+type nodeset map[tailcfg.NodeID]Node
+
+var _ json.Marshaler = nodeset{}
+var _ json.Unmarshaler = nodeset{}
+
+// MarshalJSON implements the [json.Marshaler] interface.
+func (ns nodeset) MarshalJSON() ([]byte, error) {
+	nodes := maps.Values(ns)
+	return json.Marshal(slices.Collect(nodes))
+}
+
+// MarshalJSON implements the [json.Unmarshaler] interface.
+func (ns nodeset) UnmarshalJSON(b []byte) error {
+	var nodes []Node
+	if err := json.Unmarshal(b, &nodes); err != nil {
+		return err
+	}
+	for _, n := range nodes {
+		ns[n.ID] = n
+	}
+	return nil
+}
+
 // Node represents a node in the reachability report.
 type Node struct {
-	ID tailcfg.NodeID
+	ID tailcfg.NodeID `json:"id"`
 
 	// Name is the FQDN of the node.
 	// It is also the MagicDNS name for the node.
 	// It has a trailing dot.
 	// e.g. "host.tail-scale.ts.net."
-	Name string
+	Name string `json:"name"`
 
 	// Addr is the IP address that was probed.
-	Addr netip.Addr
+	Addr netip.Addr `json:"addr"`
 }
 
 // Report contains the result of a single routecheck.
 type Report struct {
 	// Done is the time when the report was finished.
-	Done time.Time
+	Done time.Time `json:"done"`
 
 	// Reachable is the set of nodes that were reachable from the current host
 	// when this report was compiled. Missing nodes may or may not be reachable.
-	Reachable map[tailcfg.NodeID]Node
+	Reachable nodeset `json:"reachable"`
 }
 
 // Client generates Reports describing the result of both passive and active
@@ -68,6 +95,7 @@ type LocalBackend interface {
 	Peers() []tailcfg.NodeView
 	Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType, size int) (*ipnstate.PingResult, error)
 	WatchNotifications(ctx context.Context, mask ipn.NotifyWatchOpt, onWatchAdded func(), fn func(roNotify *ipn.Notify) (keepGoing bool))
+	WhoIs(proto string, ipp netip.AddrPort) (n tailcfg.NodeView, u tailcfg.UserProfile, ok bool)
 }
 
 // NewClient returns a client that probes its peers using this LocalBackend.
@@ -82,11 +110,16 @@ func NewClient(b LocalBackend) (*Client, error) {
 // Returns nil if a report isn’t available, which happens during initialization.
 func (c *Client) Report() *Report {
 	// TODO(sfllaw): Return the latest snapshot produced by background probing.
-	r, err := c.ProbeAllHARouters(context.TODO(), 5)
+	r, err := c.Refresh(context.TODO())
 	if err != nil {
 		c.logf("reachability report error: %v", err)
 	}
 	return r
+}
+
+// Refresh generates a new reachability report and returns it.
+func (c *Client) Refresh(ctx context.Context) (*Report, error) {
+	return c.ProbeAllHARouters(ctx, 5)
 }
 
 type probed struct {

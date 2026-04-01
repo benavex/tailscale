@@ -33,6 +33,7 @@ import (
 	"tailscale.com/ipn/ipnauth"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/ipn/routecheck"
 	"tailscale.com/logtail"
 	"tailscale.com/net/neterror"
 	"tailscale.com/net/netns"
@@ -82,6 +83,7 @@ var handler = map[string]LocalAPIHandler{
 	"prefs":                (*Handler).servePrefs,
 	"reload-config":        (*Handler).reloadConfig,
 	"reset-auth":           (*Handler).serveResetAuth,
+	"routecheck":           (*Handler).serveRouteCheck,
 	"set-expiry-sooner":    (*Handler).serveSetExpirySooner,
 	"shutdown":             (*Handler).serveShutdown,
 	"start":                (*Handler).serveStart,
@@ -1150,6 +1152,34 @@ func (h *Handler) servePing(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(res)
+}
+
+func (h *Handler) serveRouteCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != httpm.POST {
+		http.Error(w, "want POST", http.StatusBadRequest)
+		return
+	}
+
+	var err error
+	var report *routecheck.Report
+	if defBool(r.FormValue("force"), false) {
+		report, err = h.b.RouteChecker().Refresh(r.Context())
+	} else {
+		report = h.b.RouteChecker().Report()
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "text.plain")
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if report == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	json.NewEncoder(w).Encode(report)
 }
 
 func (h *Handler) serveDial(w http.ResponseWriter, r *http.Request) {

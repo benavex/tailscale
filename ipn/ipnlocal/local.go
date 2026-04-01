@@ -52,6 +52,7 @@ import (
 	"tailscale.com/ipn/ipnauth"
 	"tailscale.com/ipn/ipnext"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/ipn/routecheck"
 	"tailscale.com/log/sockstatlog"
 	"tailscale.com/logpolicy"
 	"tailscale.com/net/dns"
@@ -196,6 +197,7 @@ type LocalBackend struct {
 
 	health                   *health.Tracker     // always non-nil
 	polc                     policyclient.Client // always non-nil
+	routeChecker             *routecheck.Client  // always non-nil
 	metrics                  metrics
 	e                        wgengine.Engine // non-nil; TODO(bradfitz): remove; use sys
 	store                    ipn.StateStore  // non-nil; TODO(bradfitz): remove; use sys
@@ -450,6 +452,11 @@ func (b *LocalBackend) NetMon() *netmon.Monitor {
 // PolicyClient returns the policy client for the backend.
 func (b *LocalBackend) PolicyClient() policyclient.Client { return b.polc }
 
+// RouteChecker returns the route checker for the backend.
+func (b *LocalBackend) RouteChecker() *routecheck.Client {
+	return b.routeChecker
+}
+
 type metrics struct {
 	// advertisedRoutes is a metric that reports the number of network routes that are advertised by the local node.
 	// This informs the user of how many routes are being advertised by the local node, excluding exit routes.
@@ -567,6 +574,11 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	// Enable sockstats logs only on non-mobile unstable builds
 	if version.IsUnstableBuild() && !version.IsMobile() && b.sockstatLogger != nil {
 		b.sockstatLogger.SetLoggingEnabled(true)
+	}
+
+	b.routeChecker, err = routecheck.NewClient(b)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create route checker: %w", err)
 	}
 
 	// Default filter blocks everything and logs nothing, until Start() is called.
