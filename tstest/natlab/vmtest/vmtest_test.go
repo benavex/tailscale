@@ -37,11 +37,21 @@ func testSubnetRouterForOS(t testing.TB, srOS vmtest.OSImage) {
 		vmtest.DontJoinTailnet(),
 		vmtest.WebServer(8080))
 
-	env.Start()
-	env.ApproveRoutes(sr, "10.0.0.0/24")
+	// Declare test-specific steps for the web UI.
+	approveStep := env.AddStep("Approve subnet routes")
+	httpStep := env.AddStep("HTTP GET through subnet router")
 
+	env.Start()
+
+	approveStep.Begin()
+	env.ApproveRoutes(sr, "10.0.0.0/24")
+	approveStep.End(nil)
+
+	httpStep.Begin()
 	body := env.HTTPGet(client, fmt.Sprintf("http://%s:8080/", backend.LanIP(internalNet)))
 	if !strings.Contains(body, "Hello world I am backend") {
+		httpStep.End(fmt.Errorf("got %q", body))
 		t.Fatalf("got %q", body)
 	}
+	httpStep.End(nil)
 }
