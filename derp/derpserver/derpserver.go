@@ -2365,6 +2365,12 @@ func (s *Server) ExpVar() expvar.Var {
 	m.Set("counter_mesh_update_batch_size", s.meshUpdateBatchSize)
 	m.Set("counter_mesh_update_loop_count", s.meshUpdateLoopCount)
 	m.Set("counter_buffered_write_frames", s.bufferedWriteFrames)
+	m.Set("per_client_receive_bytes_per_sec", s.expVarFunc(func() any {
+		return s.perClientRecvBytesPerSec
+	}))
+	m.Set("per_client_receive_burst", s.expVarFunc(func() any {
+		return s.perClientRecvBurst
+	}))
 	var expvarVersion expvar.String
 	expvarVersion.Set(version.Long())
 	m.Set("version", &expvarVersion)
