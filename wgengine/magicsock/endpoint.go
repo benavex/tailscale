@@ -1122,6 +1122,10 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	}
 	if derpAddr.IsValid() {
+		// Traffic is flowing via DERP; opportunistically upgrade to WebRTC.
+		if mgr := de.c.webrtcMgr; mgr != nil {
+			mgr.ensureConnecting(de)
+		}
 		allOk := true
 		var txBytes int
 		for _, buff := range buffs {
@@ -2061,9 +2065,8 @@ func (de *endpoint) populatePeerStatus(ps *ipnstate.PeerStatus) {
 	de.mu.Lock()
 	defer de.mu.Unlock()
 
-	ps.Relay = de.c.derpRegionCodeOfIDLocked(int(de.derpAddr.Port()))
-
 	if de.lastSendExt.IsZero() {
+		ps.Relay = de.c.derpRegionCodeOfIDLocked(int(de.derpAddr.Port()))
 		return
 	}
 
@@ -2085,6 +2088,9 @@ func (de *endpoint) populatePeerStatus(ps *ipnstate.PeerStatus) {
 				}
 			}
 		}
+	} else {
+		// Not on a direct or WebRTC path; show the DERP relay being used.
+		ps.Relay = de.c.derpRegionCodeOfIDLocked(int(de.derpAddr.Port()))
 	}
 }
 

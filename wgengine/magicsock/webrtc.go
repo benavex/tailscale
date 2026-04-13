@@ -72,7 +72,7 @@ type webrtcManager struct {
 	peerConnectionsByEndpoint map[*endpoint]*webrtcPeerState
 	peerConnectionsByDisco    map[key.DiscoPublic]*webrtcPeerState
 
-	signalingClient *signalingClient
+	signaller rtclib.Signaller
 
 	// Control channels
 	startConnectionCh chan *endpoint
@@ -87,18 +87,16 @@ type webrtcManager struct {
 // Ensure webrtcManager implements rtclib.SignalHandler interface.
 var _ rtclib.SignalHandler = (*webrtcManager)(nil)
 
-// newWebRTCManager creates a new WebRTC manager.
-func newWebRTCManager(c *Conn, signalingURL string) *webrtcManager {
-	mgr := newWebRTCManagerBase(c, signalingURL)
+// newWebRTCManager creates a new WebRTC manager using disco-based signaling.
+func newWebRTCManager(c *Conn) *webrtcManager {
+	mgr := newWebRTCManagerBase(c)
 
-	// Create and start signaling client
-	mgr.signalingClient = newSignalingClient(signalingURL, c.logf)
-	if err := mgr.signalingClient.Start(mgr); err != nil {
-		c.logf("webrtc: failed to start signaling client: %v", err)
+	mgr.signaller = &discoSignaller{conn: c}
+	if err := mgr.signaller.Start(mgr); err != nil {
+		c.logf("webrtc: failed to start signaller: %v", err)
 		return nil
 	}
 
-	// Start event loop
 	go mgr.runLoop()
 
 	return mgr
@@ -106,10 +104,10 @@ func newWebRTCManager(c *Conn, signalingURL string) *webrtcManager {
 
 // close shuts down the WebRTC manager.
 func (m *webrtcManager) close() error {
-	// Close signaling client first to stop new messages
-	if m.signalingClient != nil {
-		if err := m.signalingClient.Close(); err != nil {
-			m.logf("webrtc: signaling client close error: %v", err)
+	// Close signaller first to stop new messages
+	if m.signaller != nil {
+		if err := m.signaller.Close(); err != nil {
+			m.logf("webrtc: signaller close error: %v", err)
 		}
 	}
 
@@ -140,11 +138,26 @@ func (m *webrtcManager) close() error {
 
 // startConnection initiates a WebRTC connection to an endpoint.
 func (m *webrtcManager) startConnection(ep *endpoint) {
+	if debugAlwaysDERP() {
+		return
+	}
 	select {
 	case m.startConnectionCh <- ep:
 	case <-m.closeCh:
 	default:
 		m.logf("webrtc: startConnection queue full for %v", ep.nodeAddr)
+	}
+}
+
+// ensureConnecting triggers a WebRTC connection to ep if one is not already
+// in progress or established. It also retries connections in terminal states
+// (Failed, Closed). It is safe to call from the hot send path.
+func (m *webrtcManager) ensureConnecting(ep *endpoint) {
+	m.mu.RLock()
+	ps, exists := m.peerConnectionsByEndpoint[ep]
+	m.mu.RUnlock()
+	if !exists || ps.state == webrtcStateFailed || ps.state == webrtcStateClosed {
+		m.startConnection(ep)
 	}
 }
 
@@ -213,6 +226,9 @@ func (m *webrtcManager) getRemoteAddr(disco key.DiscoPublic) netip.AddrPort {
 func (m *webrtcManager) runLoop() {
 	defer close(m.runLoopStoppedCh)
 
+	retryTicker := time.NewTicker(15 * time.Second)
+	defer retryTicker.Stop()
+
 	for {
 		select {
 		case ep := <-m.startConnectionCh:
@@ -221,9 +237,31 @@ func (m *webrtcManager) runLoop() {
 		case event := <-m.connectionReadyCh:
 			m.handleConnectionReady(event)
 
+		case <-retryTicker.C:
+			m.retryFailedConnections()
+
 		case <-m.closeCh:
 			return
 		}
+	}
+}
+
+// retryFailedConnections re-queues any connections in a terminal state so they
+// get a fresh attempt. This covers cases where both peers restart simultaneously
+// and the initial attempt fails before DERP is established.
+func (m *webrtcManager) retryFailedConnections() {
+	m.mu.RLock()
+	var toRetry []*endpoint
+	for ep, ps := range m.peerConnectionsByEndpoint {
+		if ps.state == webrtcStateFailed || ps.state == webrtcStateClosed {
+			toRetry = append(toRetry, ep)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, ep := range toRetry {
+		m.logf("webrtc: retrying failed connection to peer %v", ep.nodeAddr)
+		m.startConnection(ep)
 	}
 }
 
@@ -233,9 +271,16 @@ func (m *webrtcManager) handleStartConnection(ep *endpoint) {
 
 	// Check if we already have a connection
 	if ps, exists := m.peerConnectionsByEndpoint[ep]; exists {
-		if ps.state == webrtcStateConnecting || ps.state == webrtcStateConnected {
+		switch ps.state {
+		case webrtcStateConnecting, webrtcStateConnected:
 			m.mu.Unlock()
 			return
+		default:
+			// Terminal state (Failed, Closed): close the old connection and
+			// remove it from the maps so we can create a fresh one below.
+			ps.peerConn.Close()
+			delete(m.peerConnectionsByEndpoint, ep)
+			delete(m.peerConnectionsByDisco, ps.remoteDisco)
 		}
 	}
 
@@ -248,6 +293,20 @@ func (m *webrtcManager) handleStartConnection(ep *endpoint) {
 		return
 	}
 	remoteDisco := disco.key
+
+	// Check that the peer's DERP address is known before proceeding.
+	// If it isn't, the signaling offer will fail immediately. This can
+	// happen on startup or after a disco-key rotation before the DERP
+	// connection to the new key is established. The next netmap update
+	// will re-trigger startConnection once the peer is reachable.
+	ep.mu.Lock()
+	derpReady := ep.derpAddr.IsValid()
+	ep.mu.Unlock()
+	if !derpReady {
+		m.mu.Unlock()
+		return
+	}
+
 	m.logf("webrtc: starting connection to peer %v (disco %v)", ep.nodeAddr, remoteDisco.ShortString())
 
 	m.mu.Unlock()
@@ -363,9 +422,13 @@ func (m *webrtcManager) handleStartConnection(ep *endpoint) {
 	}
 
 	// Send offer via signaling
-	if err := m.signalingClient.Offer(localDisco.String(), remoteDisco.String(), &offer); err != nil {
+	if err := m.signaller.Offer(localDisco.String(), remoteDisco.String(), &offer); err != nil {
 		m.logf("webrtc: failed to send offer: %v", err)
 		peerConn.Close()
+		m.mu.Lock()
+		delete(m.peerConnectionsByEndpoint, ep)
+		delete(m.peerConnectionsByDisco, remoteDisco)
+		m.mu.Unlock()
 		return
 	}
 
@@ -419,9 +482,55 @@ func (m *webrtcManager) handleRemoteOffer(remoteDisco key.DiscoPublic, offer *we
 	ps, exists := m.peerConnectionsByDisco[remoteDisco]
 	m.mu.Unlock()
 
+	if exists {
+		switch ps.peerConn.SignalingState() {
+		case webrtc.SignalingStateHaveLocalOffer:
+			// Glare: both sides sent offers simultaneously. Tiebreak by disco key:
+			// the peer with the lexicographically smaller local key wins and keeps
+			// its offer; the loser rolls back and answers the remote offer instead.
+			localDisco := m.conn.DiscoPublicKey()
+			if localDisco.Compare(remoteDisco) < 0 {
+				// We win — ignore their offer; they will roll back and answer ours.
+				m.logf("webrtc: glare with peer %v: ignoring their offer (we win tiebreak)", remoteDisco.ShortString())
+				return
+			}
+			// We lose — roll back our offer and fall through to answer theirs.
+			m.logf("webrtc: glare with peer %v: rolling back our offer (we lose tiebreak)", remoteDisco.ShortString())
+			if err := ps.peerConn.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeRollback}); err != nil {
+				m.logf("webrtc: glare rollback failed: %v; closing and recreating", err)
+				ps.peerConn.Close()
+				m.mu.Lock()
+				delete(m.peerConnectionsByEndpoint, ps.ep)
+				delete(m.peerConnectionsByDisco, remoteDisco)
+				m.mu.Unlock()
+				exists = false
+			}
+		case webrtc.SignalingStateStable:
+			if ps.state == webrtcStateConnected || ps.state == webrtcStateConnecting {
+				// The connection is already working or in progress. Ignore the
+				// peer's offer — they will notice their connection succeeded too
+				// and stop retrying.
+				m.logf("webrtc: ignoring offer from %v, already have %v connection", remoteDisco.ShortString(), ps.state)
+				return
+			}
+			// Stable but in a terminal state (Failed/Closed): the peer is trying
+			// to reconnect. Tear down our stale entry and answer fresh below.
+			m.logf("webrtc: tearing down stale %v connection to %v, answering fresh offer", ps.state, remoteDisco.ShortString())
+			ps.peerConn.Close()
+			m.mu.Lock()
+			delete(m.peerConnectionsByEndpoint, ps.ep)
+			delete(m.peerConnectionsByDisco, remoteDisco)
+			m.mu.Unlock()
+			exists = false
+		default:
+			// Any other transitional signaling state — ignore, let it settle.
+			m.logf("webrtc: ignoring offer from %v in unexpected signaling state %v", remoteDisco.ShortString(), ps.peerConn.SignalingState())
+			return
+		}
+	}
+
 	if !exists {
 		// We received an offer but don't have a connection yet.
-		// This happens when the remote peer initiated first (glare scenario).
 		// Find the endpoint by disco key and create peer connection state.
 		ep := m.conn.findEndpointByDisco(remoteDisco)
 		if ep == nil {
@@ -521,7 +630,7 @@ func (m *webrtcManager) handleRemoteOffer(remoteDisco key.DiscoPublic, offer *we
 	}
 
 	// Send answer via signaling
-	if err := m.signalingClient.Answer(ps.localDisco.String(), remoteDisco.String(), &answer); err != nil {
+	if err := m.signaller.Answer(ps.localDisco.String(), remoteDisco.String(), &answer); err != nil {
 		m.logf("webrtc: failed to send answer: %v", err)
 		return
 	}
@@ -606,7 +715,7 @@ func parseICECandidateAddr(candidate string) netip.AddrPort {
 // handleLocalICECandidate sends a local ICE candidate to a peer via signaling.
 func (m *webrtcManager) handleLocalICECandidate(ps *webrtcPeerState, candidate *webrtc.ICECandidate) {
 	candidateInit := candidate.ToJSON()
-	if err := m.signalingClient.Candidate(ps.localDisco.String(), ps.remoteDisco.String(), &candidateInit); err != nil {
+	if err := m.signaller.Candidate(ps.localDisco.String(), ps.remoteDisco.String(), &candidateInit); err != nil {
 		m.logf("webrtc: failed to send candidate: %v", err)
 		return
 	}
@@ -654,6 +763,9 @@ func (m *webrtcManager) handleConnectionStateChange(ps *webrtcPeerState, state w
 // handleConnectionReady marks a WebRTC connection as ready and updates endpoint.
 func (m *webrtcManager) handleConnectionReady(event webrtcConnectionReadyEvent) {
 	m.logf("webrtc: connection ready for peer %v", event.remoteDisco.ShortString())
+	if debugAlwaysDERP() {
+		return
+	}
 
 	// Update endpoint to use WebRTC path
 	event.ep.mu.Lock()

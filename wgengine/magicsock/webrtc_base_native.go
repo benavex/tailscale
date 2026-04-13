@@ -12,7 +12,7 @@ import (
 	"tailscale.com/types/key"
 )
 
-func newWebRTCManagerBase(c *Conn, signalingURL string) *webrtcManager {
+func newWebRTCManagerBase(c *Conn) *webrtcManager {
 	settingEngine := webrtc.SettingEngine{}
 
 	// Use a 16 MiB SCTP receive buffer. The pion default (~32 KiB) becomes the

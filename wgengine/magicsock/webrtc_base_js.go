@@ -10,7 +10,7 @@ import (
 	"tailscale.com/types/key"
 )
 
-func newWebRTCManagerBase(c *Conn, signalingURL string) *webrtcManager {
+func newWebRTCManagerBase(c *Conn) *webrtcManager {
 	// Configure WebRTC with STUN only
 	settingEngine := webrtc.SettingEngine{}
 

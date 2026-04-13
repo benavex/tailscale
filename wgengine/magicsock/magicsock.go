@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/webrtc/v4"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
 	"go4.org/mem"
@@ -361,7 +363,7 @@ type Conn struct {
 	relayManager relayManager
 
 	// webrtcMgr manages WebRTC connections for peers.
-	// May be nil if WebRTC is disabled (no TS_DEBUG_WEBRTC_SIGNALING_URL).
+	// May be nil if WebRTC failed to initialize.
 	webrtcMgr *webrtcManager
 
 	// discoInfo is the state for an active peer DiscoKey.
@@ -750,13 +752,11 @@ func NewConn(opts Options) (*Conn, error) {
 
 	c.logf("magicsock: disco key = %v", c.discoAtomic.Short())
 
-	// Initialize WebRTC manager if signaling server URL is set
-	if signalingURL := debugWebRTCSignalingURL(); signalingURL != "" {
-		c.logf("magicsock: initializing WebRTC with signaling server %s", signalingURL)
-		c.webrtcMgr = newWebRTCManager(c, signalingURL)
-		if c.webrtcMgr == nil {
-			c.logf("magicsock: failed to initialize WebRTC manager")
-		}
+	// Initialize WebRTC manager with disco-based signaling.
+	c.logf("magicsock: initializing WebRTC with disco signaling")
+	c.webrtcMgr = newWebRTCManager(c)
+	if c.webrtcMgr == nil {
+		c.logf("magicsock: failed to initialize WebRTC manager")
 	}
 
 	return c, nil
@@ -2671,6 +2671,39 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 			RxFromNodeKey:  nodeKey,
 			Message:        req,
 		})
+	case *disco.WebRTCOffer, *disco.WebRTCAnswer, *disco.WebRTCICECandidate:
+		if !isDERP {
+			c.logf("[unexpected] WebRTC signaling message received via UDP, expected DERP only")
+			return
+		}
+		if c.webrtcMgr == nil {
+			return
+		}
+		// Dispatch to the webrtcManager off the hot path; c.mu must not be held.
+		senderStr := sender.String()
+		switch dm := dm.(type) {
+		case *disco.WebRTCOffer:
+			var sdp webrtc.SessionDescription
+			if err := json.Unmarshal(dm.Payload, &sdp); err != nil {
+				c.logf("webrtc: disco: failed to unmarshal offer from %v: %v", sender.ShortString(), err)
+				return
+			}
+			go c.webrtcMgr.HandleOffer(senderStr, "", &sdp)
+		case *disco.WebRTCAnswer:
+			var sdp webrtc.SessionDescription
+			if err := json.Unmarshal(dm.Payload, &sdp); err != nil {
+				c.logf("webrtc: disco: failed to unmarshal answer from %v: %v", sender.ShortString(), err)
+				return
+			}
+			go c.webrtcMgr.HandleAnswer(senderStr, "", &sdp)
+		case *disco.WebRTCICECandidate:
+			var candidate webrtc.ICECandidateInit
+			if err := json.Unmarshal(dm.Payload, &candidate); err != nil {
+				c.logf("webrtc: disco: failed to unmarshal ICE candidate from %v: %v", sender.ShortString(), err)
+				return
+			}
+			go c.webrtcMgr.HandleCandidate(senderStr, "", &candidate)
+		}
 	}
 	return
 }
@@ -3321,10 +3354,6 @@ func (c *Conn) updateNodes(self tailcfg.NodeView, peers []tailcfg.NodeView) (pee
 			ep.updateFromNode(n, flags.heartbeatDisabled, flags.probeUDPLifetimeOn)
 			c.peerMap.upsertEndpoint(ep, oldDiscoKey) // maybe update discokey mappings in peerMap
 
-			// Start WebRTC connection if not already started
-			if c.webrtcMgr != nil && !n.DiscoKey().IsZero() {
-				c.webrtcMgr.startConnection(ep)
-			}
 			continue
 		}
 
@@ -3389,10 +3418,6 @@ func (c *Conn) updateNodes(self tailcfg.NodeView, peers []tailcfg.NodeView) (pee
 		ep.updateFromNode(n, flags.heartbeatDisabled, flags.probeUDPLifetimeOn)
 		c.peerMap.upsertEndpoint(ep, key.DiscoPublic{})
 
-		// Start WebRTC connection to this peer if WebRTC is enabled
-		if c.webrtcMgr != nil && !n.DiscoKey().IsZero() {
-			c.webrtcMgr.startConnection(ep)
-		}
 	}
 
 	// If the set of nodes changed since the last SetNetworkMap, the
