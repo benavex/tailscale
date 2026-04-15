@@ -540,6 +540,8 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	b.currentNodeAtomic.Store(nb)
 	nb.ready()
 
+	e.SetPeerByIPPacketFunc(b.lookupPeerByIP)
+
 	if sys.InitialConfig != nil {
 		if err := b.initPrefsFromConfig(sys.InitialConfig); err != nil {
 			return nil, err
@@ -5047,6 +5049,33 @@ func extractPeerAPIPorts(services []tailcfg.Service) portPair {
 // controlclient, or nil if no network map was received yet.
 func (b *LocalBackend) NetMap() *netmap.NetworkMap {
 	return b.currentNode().NetMap()
+}
+
+// lookupPeerByIP returns the node public key for the peer that owns the
+// given IP address. It is used as a callback by wireguard-go's
+// PeerByIPPacketFunc to route outbound packets to the correct peer.
+//
+// It is called by wireguard-go on every outbound packet (not cached),
+// so it must be fast. It only handles exact node address matches
+// (100.x.y.z); subnet routes and masquerade addresses are handled by
+// a fallback in userspaceEngine.SetPeerByIPPacketFunc.
+func (b *LocalBackend) lookupPeerByIP(ip netip.Addr) (key.NodePublic, bool) {
+	// TODO(bradfitz): benchmark this and make it faster. Consider using a
+	// BART table or ART trie (here or in wireguard-go) to avoid the two
+	// map lookups and mutex acquisitions per packet. The nodeByAddr map is
+	// fast for exact matches but the slow path in userspaceEngine (linear
+	// scan of AllowedIPs for subnet routes) is O(n*m) and will be a
+	// problem for large netmaps with many subnet routes.
+	nb := b.currentNode()
+	nid, ok := nb.NodeByAddr(ip)
+	if !ok {
+		return key.NodePublic{}, false
+	}
+	peer, ok := nb.NodeByID(nid)
+	if !ok {
+		return key.NodePublic{}, false
+	}
+	return peer.Key(), true
 }
 
 func (b *LocalBackend) isEngineBlocked() bool {
