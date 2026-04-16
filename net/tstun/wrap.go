@@ -1092,7 +1092,9 @@ func stackGSOToTunGSO(pkt []byte, gso netstack_GSO) (tun.GSOOptions, error) {
 // TODO(jwhited): plumb partial checksum awareness into net/packet/checksum.
 func invertGSOChecksum(pkt []byte, gso netstack_GSO) {
 	if !buildfeatures.HasNetstack {
-		panic("unreachable")
+		// Without netstack, res.packet is always nil in injectedRead so
+		// gso is always the zero value. There is nothing to invert.
+		return
 	}
 	if gso.NeedsCsum != true {
 		return
