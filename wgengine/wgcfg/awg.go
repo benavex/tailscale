@@ -13,8 +13,28 @@ import (
 	"tailscale.com/types/logger"
 )
 
+// AmneziaVPN client defaults, mirrored from
+// amnezia-client/client/protocols/protocols_defs.h (namespace protocols::awg).
+// Used when the matching TS_AWG_* env var is unset so two peers both built
+// from this fork agree on a non-trivial obfuscation profile out of the box.
+const (
+	defaultJc   = 3
+	defaultJmin = 10
+	defaultJmax = 30
+	defaultS1   = 15
+	defaultS2   = 18
+	defaultS3   = 20
+	defaultS4   = 23
+	defaultH1   = "1020325451" // init
+	defaultH2   = "3288052141" // response
+	defaultH3   = "1766607858" // underload
+	defaultH4   = "2528465083" // transport
+)
+
 // AWGParamsFromEnv reads AmneziaWG obfuscation parameters from TS_AWG_*
-// environment variables. Unset or unparseable values are left at zero.
+// environment variables. Any unset var falls back to the AmneziaVPN client
+// default for that field, so obfuscation is on by default when this binary
+// is used.
 //
 // This is the provisional source of parameters for Phase 1 of the mesh-VPN
 // project. Phase 2 will distribute them via Headscale/MapResponse.
@@ -27,30 +47,37 @@ import (
 //	                                         "N" or "N-M", see magic-header.go)
 func AWGParamsFromEnv() AWGParams {
 	return AWGParams{
-		Jc:   envInt("TS_AWG_JC"),
-		Jmin: envInt("TS_AWG_JMIN"),
-		Jmax: envInt("TS_AWG_JMAX"),
-		S1:   envInt("TS_AWG_S1"),
-		S2:   envInt("TS_AWG_S2"),
-		S3:   envInt("TS_AWG_S3"),
-		S4:   envInt("TS_AWG_S4"),
-		H1:   os.Getenv("TS_AWG_H1"),
-		H2:   os.Getenv("TS_AWG_H2"),
-		H3:   os.Getenv("TS_AWG_H3"),
-		H4:   os.Getenv("TS_AWG_H4"),
+		Jc:   envIntDefault("TS_AWG_JC", defaultJc),
+		Jmin: envIntDefault("TS_AWG_JMIN", defaultJmin),
+		Jmax: envIntDefault("TS_AWG_JMAX", defaultJmax),
+		S1:   envIntDefault("TS_AWG_S1", defaultS1),
+		S2:   envIntDefault("TS_AWG_S2", defaultS2),
+		S3:   envIntDefault("TS_AWG_S3", defaultS3),
+		S4:   envIntDefault("TS_AWG_S4", defaultS4),
+		H1:   envStrDefault("TS_AWG_H1", defaultH1),
+		H2:   envStrDefault("TS_AWG_H2", defaultH2),
+		H3:   envStrDefault("TS_AWG_H3", defaultH3),
+		H4:   envStrDefault("TS_AWG_H4", defaultH4),
 	}
 }
 
-func envInt(k string) int {
+func envIntDefault(k string, def int) int {
 	v := os.Getenv(k)
 	if v == "" {
-		return 0
+		return def
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return 0
+		return def
 	}
 	return n
+}
+
+func envStrDefault(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 // uapiString serialises p to the device-level UAPI lines understood by
