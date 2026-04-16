@@ -1,0 +1,85 @@
+name: awg-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/awg-release.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'wgengine/**'
+      - 'net/**'
+      - 'ipn/**'
+      - 'control/**'
+      - 'derp/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clone amneziawg-go sibling for replace directive
+        run: |
+          cd ..
+          git clone --depth=1 https://github.com/benavex/amneziawg-go.git
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build tailscale and tailscaled
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go mod tidy
+          go build -tags ts_omit_netstack,ts_omit_gro -trimpath -ldflags="-s -w" -o dist/tailscale-linux-${{ matrix.goarch }} ./cmd/tailscale
+          go build -tags ts_omit_netstack,ts_omit_gro -trimpath -ldflags="-s -w" -o dist/tailscaled-linux-${{ matrix.goarch }} ./cmd/tailscaled
+          (cd dist && sha256sum tailscale-linux-${{ matrix.goarch }} tailscaled-linux-${{ matrix.goarch }} > sha256-${{ matrix.goarch }}.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-awg-linux-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create or update rolling release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: awg-latest
+        run: |
+          # Delete prior release+tag if present, then recreate so URL stays stable.
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AWG build (rolling)" \
+            --notes "Linux tailscale/tailscaled binaries built against amneziawg-go. Commit ${{ github.sha }}. Tags: ts_omit_netstack,ts_omit_gro." \
+            artifacts/*
