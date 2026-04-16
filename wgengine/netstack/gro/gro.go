@@ -87,7 +87,7 @@ func RXChecksumOffload(p *packet.Parsed) *stack.PacketBuffer {
 			p.Src.Addr().AsSlice(),
 			p.Dst.Addr().AsSlice(),
 			uint16(lenForPseudo))
-		csum = tun.Checksum(buf[csumStart:], csum)
+		csum = tun.Checksum(buf[csumStart:], uint64(csum))
 		if ^csum != 0 {
 			return nil
 		}
