@@ -28,9 +28,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	wgconn "github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/device"
-	"github.com/tailscale/wireguard-go/tun"
+	wgconn "github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/device"
+	"github.com/amnezia-vpn/amneziawg-go/tun"
 	"go4.org/netipx"
 	"tailscale.com/client/local"
 	"tailscale.com/derp"

@@ -102,7 +102,7 @@ require (
 	github.com/tailscale/setec v0.0.0-20251203133219-2ab774e4129a
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976
 	github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
-	github.com/tailscale/wireguard-go v0.0.0-20260304043104-4184faf59e56
+	github.com/amnezia-vpn/amneziawg-go v0.0.0-20260304043104-4184faf59e56
 	github.com/tailscale/xnet v0.0.0-20240729143630-8497ac4dab2e
 	github.com/tc-hib/winres v0.2.1
 	github.com/tcnksm/go-httpstat v0.2.0
@@ -503,5 +503,7 @@ require (
 	mvdan.cc/unparam v0.0.0-20240104100049-c549a3470d14 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 )
+
+replace github.com/amnezia-vpn/amneziawg-go => ../amneziawg-go
 
 tool github.com/stacklok/frizbee

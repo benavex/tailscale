@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/tailscale/wireguard-go/device"
+	"github.com/amnezia-vpn/amneziawg-go/device"
 )
 
 var (
