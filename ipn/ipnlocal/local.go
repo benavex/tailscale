@@ -245,6 +245,16 @@ type LocalBackend struct {
 
 	startOnce sync.Once // protects the one‑time initialization in [LocalBackend.Start]
 
+	// meshWatchdogOnce protects a singleton start of the mesh-failover
+	// watchdog goroutine (see meshfailover.go). We use Once rather than
+	// a bool flag because Start can be re-entered after a failover-
+	// triggered control client reset.
+	meshWatchdogOnce sync.Once
+
+	// meshFailover holds the mesh-failover subsystem state. All fields
+	// guarded by b.mu. See meshfailover.go for semantics.
+	meshFailover meshFailover
+
 	// extHost is the bridge between [LocalBackend] and the registered [ipnext.Extension]s.
 	// It may be nil in tests that use direct composite literal initialization of [LocalBackend]
 	// instead of calling [NewLocalBackend]. A nil pointer is a valid, no-op host.
@@ -1600,9 +1610,11 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 	if st.Err != nil {
 		if errors.Is(st.Err, io.EOF) {
 			b.logf("[v1] Received error: EOF")
+			b.noteControlFailureLocked()
 			return
 		}
 		b.logf("Received error: %v", st.Err)
+		b.noteControlFailureLocked()
 		if vizerr, ok := vizerror.As(st.Err); ok {
 			s := vizerr.Error()
 			b.sendLocked(ipn.Notify{ErrMessage: &s})
@@ -2516,6 +2528,11 @@ func (b *LocalBackend) startLocked(opts ipn.Options) error {
 	b.logf("Start")
 	logf := logger.WithPrefix(b.logf, "Start: ")
 	b.startOnce.Do(b.initOnce)
+
+	// Start the mesh-failover watchdog once. Cheap no-op if this
+	// build is against a single-server headscale — watchdog only
+	// acts when a mesh cap has populated the peer list.
+	b.runMeshFailoverWatchdog()
 
 	var clientToShutdown controlclient.Client
 	defer func() {
@@ -6430,6 +6447,7 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 		login = cmp.Or(profileFromView(nm.UserProfiles[nm.User()]).LoginName, "<missing-profile>")
 	}
 	b.currentNode().SetNetMap(nm)
+	b.updateMeshFromNetmapLocked(nm)
 	if ms, ok := b.sys.MagicSock.GetOK(); ok {
 		if nm != nil {
 			ms.SetNetworkMap(nm.SelfNode, nm.Peers)

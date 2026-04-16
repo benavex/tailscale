@@ -27,6 +27,45 @@ import (
 // hscontrol/types.CapabilityAmneziaWG.
 const CapabilityAmneziaWG tailcfg.NodeCapability = "benavex.com/cap/amneziawg"
 
+// CapabilityMesh is the node capability under which headscale
+// publishes the mesh view (self + peers + currently-elected crown)
+// so clients can fail over to another control server without DNS.
+// Payload is a JSON object; see [MeshSnapshot].
+const CapabilityMesh tailcfg.NodeCapability = "benavex.com/cap/mesh"
+
+// MeshPeer is one sibling control server as seen by the crown-election
+// subsystem on the local headscale.
+type MeshPeer struct {
+	Name          string  `json:"name"`
+	URL           string  `json:"url"`
+	Online        bool    `json:"online"`
+	UptimeSeconds float64 `json:"uptime_seconds"`
+	Score         float64 `json:"score"`
+}
+
+// MeshSnapshot is the payload of [CapabilityMesh]. Mirrors
+// hscontrol/mesh.Snapshot on the server side.
+type MeshSnapshot struct {
+	Self  MeshPeer   `json:"self"`
+	Peers []MeshPeer `json:"peers"`
+	Crown string     `json:"crown"`
+}
+
+// ExtractMesh reads [CapabilityMesh] from the netmap SelfNode. Returns
+// a zero-value MeshSnapshot and ok=false when the cap is missing or
+// malformed; the caller may treat that as "no mesh / operator is on a
+// single-server install".
+func ExtractMesh(nm *netmap.NetworkMap) (MeshSnapshot, bool) {
+	if nm == nil || !nm.SelfNode.Valid() {
+		return MeshSnapshot{}, false
+	}
+	vals, err := tailcfg.UnmarshalNodeCapViewJSON[MeshSnapshot](nm.SelfNode.CapMap(), CapabilityMesh)
+	if err != nil || len(vals) == 0 {
+		return MeshSnapshot{}, false
+	}
+	return vals[0], true
+}
+
 func nodeDebugName(n tailcfg.NodeView) string {
 	name, _, _ := strings.Cut(cmp.Or(n.Name(), n.Hostinfo().Hostname()), ".")
 	return name
@@ -89,6 +128,24 @@ func WGCfg(pk key.NodePrivate, nm *netmap.NetworkMap, logf logger.Logf, flags ne
 			logf("[v1] wgcfg: ignoring malformed %s cap: %v", CapabilityAmneziaWG, err)
 		} else if len(vals) > 0 {
 			cfg.AWG = wgcfg.MergeAWGParams(vals[0], wgcfg.AWGParamsFromEnv())
+		}
+
+		// Log the mesh view whenever a netmap arrives carrying it. The
+		// actual control-URL rotation is done elsewhere (see
+		// [ipnlocal.LocalBackend.meshFailover]); here we just surface it
+		// to operators running `tail -f tailscaled.log` who want a quick
+		// read on which control server is currently the crown.
+		if snap, ok := ExtractMesh(nm); ok {
+			peerNames := make([]string, 0, len(snap.Peers))
+			for _, p := range snap.Peers {
+				state := "offline"
+				if p.Online {
+					state = "online"
+				}
+				peerNames = append(peerNames, p.Name+"("+state+")")
+			}
+			logf("mesh: self=%s crown=%s peers=%v",
+				snap.Self.Name, snap.Crown, peerNames)
 		}
 	}
 
