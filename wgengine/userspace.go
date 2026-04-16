@@ -573,6 +573,13 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 	if err := e.wgdev.Up(); err != nil {
 		return nil, fmt.Errorf("wgdev.Up: %w", err)
 	}
+	// Apply AmneziaWG obfuscation params (if any) before any Reconfig so
+	// traffic is obfuscated from the first packet. Engine-level settings
+	// are independent of the netmap, so they are applied here rather than
+	// in authReconfig which only runs after login.
+	if err := wgcfg.ApplyAWG(e.wgdev, wgcfg.AWGParamsFromEnv(), e.logf); err != nil {
+		e.logf("wgengine: %v", err)
+	}
 	e.logf("Bringing router up...")
 	if err := e.router.Up(); err != nil {
 		return nil, fmt.Errorf("router.Up: %w", err)
