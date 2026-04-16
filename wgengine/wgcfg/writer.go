@@ -68,6 +68,10 @@ func (cfg *Config) ToUAPI(logf logger.Logf, w io.Writer, prev *Config) error {
 		setStr("h2", cfg.AWG.H2)
 		setStr("h3", cfg.AWG.H3)
 		setStr("h4", cfg.AWG.H4)
+		logf("wgcfg: AWG reconfig: jc=%d jmin=%d jmax=%d s1=%d s2=%d s3=%d s4=%d h1=%q h2=%q h3=%q h4=%q",
+			cfg.AWG.Jc, cfg.AWG.Jmin, cfg.AWG.Jmax,
+			cfg.AWG.S1, cfg.AWG.S2, cfg.AWG.S3, cfg.AWG.S4,
+			cfg.AWG.H1, cfg.AWG.H2, cfg.AWG.H3, cfg.AWG.H4)
 	}
 
 	old := make(map[key.NodePublic]Peer)
