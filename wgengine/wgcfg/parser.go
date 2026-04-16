@@ -126,6 +126,13 @@ func (cfg *Config) handleDeviceLine(k, value mem.RO, valueBytes []byte) error {
 		}
 	case k.EqualString("listen_port") || k.EqualString("fwmark"):
 	// ignore
+	case k.EqualString("jc") || k.EqualString("jmin") || k.EqualString("jmax") ||
+		k.EqualString("s1") || k.EqualString("s2") || k.EqualString("s3") || k.EqualString("s4") ||
+		k.EqualString("h1") || k.EqualString("h2") || k.EqualString("h3") || k.EqualString("h4") ||
+		k.EqualString("i1") || k.EqualString("i2") || k.EqualString("i3") ||
+		k.EqualString("i4") || k.EqualString("i5"):
+		// AmneziaWG obfuscation params emitted by amneziawg-go's IpcGetOperation.
+		// Tailscale's wgcfg.Config doesn't model them; they are set via IpcSet elsewhere.
 	default:
 		return fmt.Errorf("unexpected IpcGetOperation key: %q", k.StringCopy())
 	}
