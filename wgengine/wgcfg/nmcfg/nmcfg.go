@@ -20,6 +20,13 @@ import (
 	"tailscale.com/wgengine/wgcfg"
 )
 
+// CapabilityAmneziaWG is the node capability under which headscale
+// publishes AmneziaWG obfuscation parameters in the requesting node's
+// SelfNode.CapMap. Payload is a JSON object with fields matching
+// [wgcfg.AWGParams]. Keep in sync with headscale's
+// hscontrol/types.CapabilityAmneziaWG.
+const CapabilityAmneziaWG tailcfg.NodeCapability = "benavex.com/cap/amneziawg"
+
 func nodeDebugName(n tailcfg.NodeView) string {
 	name, _, _ := strings.Cut(cmp.Or(n.Name(), n.Hostinfo().Hostname()), ".")
 	return name
@@ -71,6 +78,17 @@ func WGCfg(pk key.NodePrivate, nm *netmap.NetworkMap, logf logger.Logf, flags ne
 				cfg.NetworkLogging.DomainID = domainID
 				cfg.NetworkLogging.LogExitFlowEnabled = logExitFlowEnabled
 			}
+		}
+
+		// Pull AmneziaWG obfuscation params published by headscale via
+		// CapabilityAmneziaWG. When both netmap and env vars supply
+		// values, netmap wins (server is the source of truth); zero-valued
+		// fields in the cap fall back to the env var equivalent so the
+		// operator can override individual keys locally.
+		if vals, err := tailcfg.UnmarshalNodeCapViewJSON[wgcfg.AWGParams](nm.SelfNode.CapMap(), CapabilityAmneziaWG); err != nil {
+			logf("[v1] wgcfg: ignoring malformed %s cap: %v", CapabilityAmneziaWG, err)
+		} else if len(vals) > 0 {
+			cfg.AWG = wgcfg.MergeAWGParams(vals[0], wgcfg.AWGParamsFromEnv())
 		}
 	}
 

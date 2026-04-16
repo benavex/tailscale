@@ -80,6 +80,48 @@ func envStrDefault(k, def string) string {
 	return def
 }
 
+// MergeAWGParams returns primary with any zero-valued field filled in
+// from fallback. Used to combine headscale-published params (primary,
+// source of truth) with the local env-var derived defaults (fallback)
+// so operators can override individual keys per-node without having to
+// republish a complete set from the server.
+func MergeAWGParams(primary, fallback AWGParams) AWGParams {
+	if primary.Jc == 0 {
+		primary.Jc = fallback.Jc
+	}
+	if primary.Jmin == 0 {
+		primary.Jmin = fallback.Jmin
+	}
+	if primary.Jmax == 0 {
+		primary.Jmax = fallback.Jmax
+	}
+	if primary.S1 == 0 {
+		primary.S1 = fallback.S1
+	}
+	if primary.S2 == 0 {
+		primary.S2 = fallback.S2
+	}
+	if primary.S3 == 0 {
+		primary.S3 = fallback.S3
+	}
+	if primary.S4 == 0 {
+		primary.S4 = fallback.S4
+	}
+	if primary.H1 == "" {
+		primary.H1 = fallback.H1
+	}
+	if primary.H2 == "" {
+		primary.H2 = fallback.H2
+	}
+	if primary.H3 == "" {
+		primary.H3 = fallback.H3
+	}
+	if primary.H4 == "" {
+		primary.H4 = fallback.H4
+	}
+	return primary
+}
+
 // uapiString serialises p to the device-level UAPI lines understood by
 // amneziawg-go. Fields with zero/empty values are omitted. Returns an empty
 // string when nothing is set so callers can cheaply skip the IpcSet.
