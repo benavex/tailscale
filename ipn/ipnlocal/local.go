@@ -5262,6 +5262,7 @@ func (b *LocalBackend) authReconfigLocked() {
 		b.logf("wgcfg: %v", err)
 		return
 	}
+	cfg.AWG = wgcfg.AWGParamsFromEnv()
 
 	oneCGNATRoute := shouldUseOneCGNATRoute(b.logf, b.sys.NetMon.Get(), b.sys.ControlKnobs(), version.OS())
 	rcfg := b.routerConfigLocked(cfg, prefs, nm, oneCGNATRoute)

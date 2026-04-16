@@ -43,6 +43,7 @@ var _ConfigCloneNeedsRegeneration = Config(struct {
 		DomainID           logid.PrivateID
 		LogExitFlowEnabled bool
 	}
+	AWG AWGParams
 }{})
 
 // Clone makes a deep copy of Peer.

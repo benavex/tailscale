@@ -43,6 +43,33 @@ func (cfg *Config) ToUAPI(logf logger.Logf, w io.Writer, prev *Config) error {
 		set("private_key", cfg.PrivateKey.UntypedHexString())
 	}
 
+	// AmneziaWG obfuscation params. Emit when they changed from the previous
+	// config. Only non-zero values are emitted; the amneziawg-go engine
+	// rejects setting jc/jmin/jmax to <=0 (see device/uapi.go).
+	if cfg.AWG != prev.AWG {
+		setInt := func(key string, v int) {
+			if v != 0 {
+				set(key, strconv.Itoa(v))
+			}
+		}
+		setStr := func(key, v string) {
+			if v != "" {
+				set(key, v)
+			}
+		}
+		setInt("jc", cfg.AWG.Jc)
+		setInt("jmin", cfg.AWG.Jmin)
+		setInt("jmax", cfg.AWG.Jmax)
+		setInt("s1", cfg.AWG.S1)
+		setInt("s2", cfg.AWG.S2)
+		setInt("s3", cfg.AWG.S3)
+		setInt("s4", cfg.AWG.S4)
+		setStr("h1", cfg.AWG.H1)
+		setStr("h2", cfg.AWG.H2)
+		setStr("h3", cfg.AWG.H3)
+		setStr("h4", cfg.AWG.H4)
+	}
+
 	old := make(map[key.NodePublic]Peer)
 	for _, p := range prev.Peers {
 		old[p.PublicKey] = p

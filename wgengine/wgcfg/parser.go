@@ -126,13 +126,60 @@ func (cfg *Config) handleDeviceLine(k, value mem.RO, valueBytes []byte) error {
 		}
 	case k.EqualString("listen_port") || k.EqualString("fwmark"):
 	// ignore
-	case k.EqualString("jc") || k.EqualString("jmin") || k.EqualString("jmax") ||
-		k.EqualString("s1") || k.EqualString("s2") || k.EqualString("s3") || k.EqualString("s4") ||
-		k.EqualString("h1") || k.EqualString("h2") || k.EqualString("h3") || k.EqualString("h4") ||
-		k.EqualString("i1") || k.EqualString("i2") || k.EqualString("i3") ||
+	case k.EqualString("jc"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.Jc = int(n)
+	case k.EqualString("jmin"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.Jmin = int(n)
+	case k.EqualString("jmax"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.Jmax = int(n)
+	case k.EqualString("s1"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.S1 = int(n)
+	case k.EqualString("s2"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.S2 = int(n)
+	case k.EqualString("s3"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.S3 = int(n)
+	case k.EqualString("s4"):
+		n, err := mem.ParseInt(value, 10, 32)
+		if err != nil {
+			return err
+		}
+		cfg.AWG.S4 = int(n)
+	case k.EqualString("h1"):
+		cfg.AWG.H1 = value.StringCopy()
+	case k.EqualString("h2"):
+		cfg.AWG.H2 = value.StringCopy()
+	case k.EqualString("h3"):
+		cfg.AWG.H3 = value.StringCopy()
+	case k.EqualString("h4"):
+		cfg.AWG.H4 = value.StringCopy()
+	case k.EqualString("i1") || k.EqualString("i2") || k.EqualString("i3") ||
 		k.EqualString("i4") || k.EqualString("i5"):
-		// AmneziaWG obfuscation params emitted by amneziawg-go's IpcGetOperation.
-		// Tailscale's wgcfg.Config doesn't model them; they are set via IpcSet elsewhere.
+		// i1-i5 (obfuscated chain packets) are not yet modelled; ignore
+		// so that reading IpcGetOperation output does not error.
 	default:
 		return fmt.Errorf("unexpected IpcGetOperation key: %q", k.StringCopy())
 	}

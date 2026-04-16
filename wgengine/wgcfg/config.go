@@ -31,7 +31,32 @@ type Config struct {
 		DomainID           logid.PrivateID
 		LogExitFlowEnabled bool
 	}
+
+	// AWG holds AmneziaWG obfuscation parameters applied at the device level.
+	// Zero values are not emitted to the underlying engine.
+	AWG AWGParams
 }
+
+// AWGParams holds the device-level AmneziaWG obfuscation parameters.
+// Zero values mean "not set" and are omitted from the UAPI stream.
+// The underlying amneziawg-go engine rejects re-setting a previously-set
+// value to <= 0, so these should be configured once at startup.
+type AWGParams struct {
+	Jc   int // junk packet count
+	Jmin int // junk packet min size
+	Jmax int // junk packet max size
+	S1   int // padding size added to handshake init
+	S2   int // padding size added to handshake response
+	S3   int // padding size added to cookie reply
+	S4   int // padding size added to transport data
+	H1   string // magic-header spec for handshake init ("N" or "N-M")
+	H2   string // magic-header spec for handshake response
+	H3   string // magic-header spec for cookie reply
+	H4   string // magic-header spec for transport data
+}
+
+// IsZero reports whether p has no fields set.
+func (p AWGParams) IsZero() bool { return p == (AWGParams{}) }
 
 func (c *Config) Equal(o *Config) bool {
 	if c == nil || o == nil {
@@ -40,6 +65,7 @@ func (c *Config) Equal(o *Config) bool {
 	return c.PrivateKey.Equal(o.PrivateKey) &&
 		c.MTU == o.MTU &&
 		c.NetworkLogging == o.NetworkLogging &&
+		c.AWG == o.AWG &&
 		slices.Equal(c.Addresses, o.Addresses) &&
 		slices.Equal(c.DNS, o.DNS) &&
 		slices.EqualFunc(c.Peers, o.Peers, Peer.Equal)
