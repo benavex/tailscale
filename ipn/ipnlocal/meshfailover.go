@@ -93,26 +93,24 @@ func (b *LocalBackend) maybeFailoverControlURL() {
 		return
 	}
 
-	// Pick next peer. Skip any that currently look offline in our last
-	// known snapshot — if everything is offline, rotate through anyway
-	// (at least one might actually be alive and just not reachable
-	// from the local probe).
+	// Pick next online peer. If none of the snapshot entries are
+	// marked online, stay on the current URL — we have no evidence
+	// that any alternative is better, and rotating to a known-dead
+	// peer just stretches the outage.
 	var target nmcfg.MeshPeer
 	for i := 0; i < len(mf.peers); i++ {
 		candidate := mf.peers[(mf.rotateIdx+i)%len(mf.peers)]
-		if candidate.URL == "" {
+		if candidate.URL == "" || !candidate.Online {
 			continue
 		}
-		if candidate.Online {
-			target = candidate
-			mf.rotateIdx = (mf.rotateIdx + i + 1) % len(mf.peers)
-			break
-		}
+		target = candidate
+		mf.rotateIdx = (mf.rotateIdx + i + 1) % len(mf.peers)
+		break
 	}
 	if target.URL == "" {
-		// Nobody online; try next in round-robin anyway.
-		target = mf.peers[mf.rotateIdx%len(mf.peers)]
-		mf.rotateIdx = (mf.rotateIdx + 1) % len(mf.peers)
+		b.logf("mesh: no online peer to rotate to; staying on %q", b.pm.CurrentPrefs().ControlURL())
+		b.mu.Unlock()
+		return
 	}
 
 	currentURL := b.pm.CurrentPrefs().ControlURL()
