@@ -246,8 +246,8 @@ func (b *LocalBackend) maybeFollowCrownExitNode() {
 
 	b.mu.Lock()
 	exitName := b.meshFailover.crownExitNodeFromMeshLocked()
-	nm := b.netMap
 	b.mu.Unlock()
+	nm := b.currentNode().NetMap()
 
 	if exitName == "" || nm == nil {
 		// Crown has no exit_node_name configured, or no netmap yet.
