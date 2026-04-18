@@ -2308,6 +2308,12 @@ func (b *LocalBackend) resolveAutoExitNodeLocked(prefs *ipn.Prefs) (prefsChanged
 	if !prefs.AutoExitNode.IsSet() {
 		return false
 	}
+	// follow-crown: meshFailover.maybeFollowCrownExitNode is the
+	// authoritative picker. Skip the upstream lastSuggestedExitNode
+	// selector so we don't fight it on every netmap.
+	if prefs.AutoExitNode == ipn.FollowCrownExitNode {
+		return false
+	}
 	if _, err := b.suggestExitNodeLocked(); err != nil && !errors.Is(err, ErrNoPreferredDERP) {
 		b.logf("failed to select auto exit node: %v", err) // non-fatal, see below
 	}

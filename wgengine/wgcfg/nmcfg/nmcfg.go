@@ -52,6 +52,13 @@ type MeshPeer struct {
 	// pair (NoisePubHex, ClusterSigHex) verifies under the pinned
 	// cluster pubkey.
 	ClusterSigHex string `json:"cluster_sig,omitempty"`
+
+	// ExitNodeName is the tailnet hostname of the per-VPS tailscaled
+	// that runs alongside this peer's headscale and advertises an
+	// exit-node route. Used by follow-crown egress mode: when this
+	// peer is the elected crown, the client looks up the netmap node
+	// whose name matches this field and pins ExitNodeID to it.
+	ExitNodeName string `json:"exit_node_name,omitempty"`
 }
 
 // MeshSnapshot is the payload of [CapabilityMesh]. Mirrors

@@ -4,9 +4,11 @@
 package ipnlocal
 
 import (
+	"strings"
 	"time"
 
 	"tailscale.com/ipn"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/netmap"
 	"tailscale.com/wgengine/wgcfg/nmcfg"
 )
@@ -22,6 +24,16 @@ type meshFailover struct {
 	// carried the mesh cap. Order is preserved from the server so
 	// every client rotates through the same sequence.
 	peers []nmcfg.MeshPeer
+
+	// self is the local headscale's snapshot entry from the last
+	// netmap. Tracked alongside peers so the follow-crown logic can
+	// resolve a crown that points back at "self".
+	self nmcfg.MeshPeer
+
+	// crown is the name of the currently-elected crown headscale,
+	// taken from the most recent mesh CapMap snapshot. Empty until
+	// the first netmap with a snapshot lands.
+	crown string
 
 	// lastOK is the wall-clock time of the most recent successful
 	// control message (netmap received). Zero until first success.
@@ -68,6 +80,35 @@ func (b *LocalBackend) updateMeshFromNetmapLocked(nm *netmap.NetworkMap) {
 		return
 	}
 	b.meshFailover.peers = append(b.meshFailover.peers[:0], snap.Peers...)
+	b.meshFailover.self = snap.Self
+
+	// Snapshot crown change before we drop the lock so the rotation
+	// goroutine sees the new value. Don't fire EditPrefs from under
+	// b.mu — defer to the watchdog tick.
+	if snap.Crown != b.meshFailover.crown {
+		b.meshFailover.crown = snap.Crown
+	}
+}
+
+// crownExitNodeFromMeshLocked returns the ExitNodeName the current
+// crown advertises in the mesh snapshot. Empty when no crown is set,
+// no matching peer entry, or the operator hasn't configured exit_node_name
+// on that headscale.
+//
+// b.mu must be held (read).
+func (b *meshFailover) crownExitNodeFromMeshLocked() string {
+	if b.crown == "" {
+		return ""
+	}
+	if b.self.Name == b.crown {
+		return b.self.ExitNodeName
+	}
+	for _, p := range b.peers {
+		if p.Name == b.crown {
+			return p.ExitNodeName
+		}
+	}
+	return ""
 }
 
 // noteControlFailureLocked records that the control connection just
@@ -188,6 +229,71 @@ func (b *LocalBackend) maybeFailoverControlURL() {
 	b.mu.Unlock()
 }
 
+// maybeFollowCrownExitNode pins ExitNodeID to the crown's
+// declared exit-node when prefs.AutoExitNode == "follow-crown".
+//
+// Called from updateMeshFromNetmapLocked (so it fires the moment a new
+// crown lands in a netmap) and from the watchdog tick (so it converges
+// even if the netmap arrived during a rotation). Idempotent: bails out
+// when the desired ExitNodeID already matches.
+//
+// NOT under b.mu — uses EditPrefs which acquires the lock itself.
+func (b *LocalBackend) maybeFollowCrownExitNode() {
+	prefs := b.pm.CurrentPrefs()
+	if prefs.AutoExitNode() != ipn.FollowCrownExitNode {
+		return
+	}
+
+	b.mu.Lock()
+	exitName := b.meshFailover.crownExitNodeFromMeshLocked()
+	nm := b.netMap
+	b.mu.Unlock()
+
+	if exitName == "" || nm == nil {
+		// Crown has no exit_node_name configured, or no netmap yet.
+		// Keep whatever was last set so a missing-config blip doesn't
+		// blackhole egress.
+		return
+	}
+
+	// Resolve the tailnet hostname → StableNodeID. tailcfg.Node.Name is
+	// the FQDN ("exit-vps1.benavex.hs-test.local."), so match by the
+	// label before the first dot, or by Hostinfo().Hostname() exactly.
+	var target tailcfg.StableNodeID
+	for _, peer := range nm.Peers {
+		if peer.Hostinfo().Hostname() == exitName {
+			target = peer.StableID()
+			break
+		}
+		name := peer.Name()
+		if i := strings.IndexByte(name, '.'); i > 0 {
+			name = name[:i]
+		}
+		if name == exitName {
+			target = peer.StableID()
+			break
+		}
+	}
+	if target.IsZero() {
+		// Crown's declared exit node isn't in our netmap (yet?).
+		// Wait for the next netmap cycle rather than churning Prefs.
+		return
+	}
+	if prefs.ExitNodeID() == target {
+		return
+	}
+
+	b.logf("mesh: follow-crown rotating exit node to %q (crown=%q)", exitName, b.meshFailover.crown)
+	if _, err := b.EditPrefs(&ipn.MaskedPrefs{
+		ExitNodeIDSet: true,
+		Prefs: ipn.Prefs{
+			ExitNodeID: target,
+		},
+	}); err != nil {
+		b.logf("mesh: follow-crown EditPrefs failed: %v", err)
+	}
+}
+
 // runMeshFailoverWatchdog is the background loop that drives rotation.
 // Started once per LocalBackend; exits when b.ctx is cancelled.
 func (b *LocalBackend) runMeshFailoverWatchdog() {
@@ -203,6 +309,7 @@ func (b *LocalBackend) runMeshFailoverWatchdog() {
 					return
 				case <-t.C:
 					b.maybeFailoverControlURL()
+					b.maybeFollowCrownExitNode()
 				}
 			}
 		})

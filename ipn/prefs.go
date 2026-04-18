@@ -1136,6 +1136,16 @@ type ExitNodeExpression string
 // offering the best performance will be preferred.
 const AnyExitNode ExitNodeExpression = "any"
 
+// FollowCrownExitNode (benavex fork extension) means: at every netmap
+// update, look at the mesh CapMap snapshot, find the entry whose Name
+// equals snap.Crown, take that entry's ExitNodeName, and pin
+// ExitNodeID to the netmap peer with that hostname. So phones don't
+// notice when the upstream control plane moves between VPSes — egress
+// follows along automatically. Set via `tailscale set
+// --exit-node=auto:follow-crown` (or `up`). When the current crown
+// has no ExitNodeName declared, the previous selection is kept.
+const FollowCrownExitNode ExitNodeExpression = "follow-crown"
+
 // IsSet reports whether the expression is non-empty and can be used
 // to select an exit node.
 func (e ExitNodeExpression) IsSet() bool {
