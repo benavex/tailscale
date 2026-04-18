@@ -4,14 +4,28 @@
 package ipnlocal
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
+	"tailscale.com/health"
 	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/netmap"
 	"tailscale.com/wgengine/wgcfg/nmcfg"
 )
+
+// meshRotationBlockedWarnable surfaces the "no eligible peer to rotate
+// to" condition to operators via the standard Notify.Health channel.
+// Used when every candidate peer fails pin verification — without
+// this, the refusal is logged but invisible on Android (no adb logcat).
+var meshRotationBlockedWarnable = health.Register(&health.Warnable{
+	Code:                "mesh-rotation-blocked",
+	Title:               "Mesh failover blocked",
+	Severity:            health.SeverityHigh,
+	Text:                health.StaticMessage("Cannot rotate to an alternate control server: every candidate failed verification or is offline. Re-pin the cluster (`tailscale mesh pin <url> <verifier>`) or check connectivity."),
+	ImpactsConnectivity: true,
+})
 
 // meshFailover tracks sibling control servers advertised via the
 // benavex.com/cap/mesh CapMap entry and rotates [ipn.Prefs.ControlURL]
@@ -88,6 +102,14 @@ func (b *LocalBackend) updateMeshFromNetmapLocked(nm *netmap.NetworkMap) {
 	if snap.Crown != b.meshFailover.crown {
 		b.meshFailover.crown = snap.Crown
 	}
+
+	// Persist to disk so the next cold start has a peer list before
+	// the first netmap arrives. Best-effort; errors are logged inside
+	// savePersistedMeshState. Fixes I-02 mode A: phone with dead
+	// primary previously had no way to learn about siblings without
+	// completing a full netmap exchange first.
+	peersCopy := append([]nmcfg.MeshPeer(nil), snap.Peers...)
+	b.savePersistedMeshState(peersCopy, snap.Self, snap.Crown)
 }
 
 // crownExitNodeFromMeshLocked returns the ExitNodeName the current
@@ -161,30 +183,62 @@ func (b *LocalBackend) maybeFailoverControlURL() {
 	}
 	pinPresent := pin != nil
 	var target nmcfg.MeshPeer
-	var skipped int
-	for i := 0; i < len(mf.peers); i++ {
-		candidate := mf.peers[(mf.rotateIdx+i)%len(mf.peers)]
-		if candidate.URL == "" || !candidate.Online {
-			continue
-		}
-		if pinPresent {
-			if err := b.verifyPeerAgainstPin(candidate); err != nil {
-				b.logf("mesh: refusing rotation to %q (%s): %v",
-					candidate.URL, candidate.Name, err)
-				skipped++
+	var skippedOffline, skippedUnverified int
+
+	// Two-pass: first pass honours the Online flag (preferred targets);
+	// second pass tries any candidate that isn't actively known to be
+	// offline. Why: I-02 mode B — when the bound primary dies, the last
+	// netmap from it may have shown the surviving sibling as Online=false
+	// (stale gossip). Refusing to try a maybe-offline peer guarantees the
+	// outage continues until the user manually intervenes. A failed dial
+	// costs one round-trip; trying anyway is strictly better than sitting
+	// on a known-dead primary.
+	for pass := 0; pass < 2 && target.URL == ""; pass++ {
+		strictOnline := pass == 0
+		for i := 0; i < len(mf.peers); i++ {
+			candidate := mf.peers[(mf.rotateIdx+i)%len(mf.peers)]
+			if candidate.URL == "" {
 				continue
 			}
+			if strictOnline && !candidate.Online {
+				if pass == 0 {
+					skippedOffline++
+				}
+				continue
+			}
+			if pinPresent {
+				if err := b.verifyPeerAgainstPin(candidate); err != nil {
+					b.logf("mesh: refusing rotation to %q (%s): %v",
+						candidate.URL, candidate.Name, err)
+					if pass == 0 {
+						skippedUnverified++
+					}
+					continue
+				}
+			}
+			target = candidate
+			mf.rotateIdx = (mf.rotateIdx + i + 1) % len(mf.peers)
+			break
 		}
-		target = candidate
-		mf.rotateIdx = (mf.rotateIdx + i + 1) % len(mf.peers)
-		break
 	}
+
 	if target.URL == "" {
-		b.logf("mesh: no eligible peer to rotate to (skipped %d unverified); staying on %q",
-			skipped, b.pm.CurrentPrefs().ControlURL())
+		b.logf("mesh: no eligible peer to rotate to (skipped %d offline, %d unverified); staying on %q",
+			skippedOffline, skippedUnverified, b.pm.CurrentPrefs().ControlURL())
+		// Surface to operators via the standard health channel — without
+		// this, a phone whose every candidate fails verification has no
+		// user-visible signal that re-pinning would fix it. Reset on
+		// next successful rotation.
+		if skippedUnverified > 0 {
+			b.health.SetUnhealthy(meshRotationBlockedWarnable, health.Args{
+				health.ArgError: fmt.Sprintf("%d candidate(s) failed pin verification", skippedUnverified),
+			})
+		}
 		b.mu.Unlock()
 		return
 	}
+	// Clear any prior health warning — we found a target.
+	b.health.SetHealthy(meshRotationBlockedWarnable)
 
 	currentURL := b.pm.CurrentPrefs().ControlURL()
 	if target.URL == currentURL {
@@ -300,6 +354,14 @@ func (b *LocalBackend) runMeshFailoverWatchdog() {
 	// Lazy singleton: don't spawn the goroutine twice if Start is
 	// re-entered after a failover-triggered restart.
 	b.meshWatchdogOnce.Do(func() {
+		// Hydrate from disk before the first probe tick so a cold
+		// start with a dead primary already has a peer list to
+		// rotate through. Idempotent — does nothing if a netmap
+		// already populated the in-memory list.
+		b.mu.Lock()
+		b.hydrateMeshFromDisk()
+		b.mu.Unlock()
+
 		b.goTracker.Go(func() {
 			t := time.NewTicker(meshFailoverProbeInterval)
 			defer t.Stop()
