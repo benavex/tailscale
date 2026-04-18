@@ -123,7 +123,8 @@ func (b *LocalBackend) savePersistedMeshState(peers []nmcfg.MeshPeer, self nmcfg
 // populated, so a stale persisted file doesn't override fresh netmap
 // data.
 //
-// b.mu must be held.
+// b.mu must be held by the caller. Currently only called from
+// runMeshFailoverWatchdog, which itself runs under startLocked's lock.
 func (b *LocalBackend) hydrateMeshFromDisk() {
 	if len(b.meshFailover.peers) > 0 {
 		return

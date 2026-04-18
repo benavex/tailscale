@@ -350,6 +350,10 @@ func (b *LocalBackend) maybeFollowCrownExitNode() {
 
 // runMeshFailoverWatchdog is the background loop that drives rotation.
 // Started once per LocalBackend; exits when b.ctx is cancelled.
+//
+// Caller invariant: this is invoked from startLocked, which holds b.mu.
+// hydrateMeshFromDisk therefore runs without re-acquiring the lock to
+// avoid self-deadlock.
 func (b *LocalBackend) runMeshFailoverWatchdog() {
 	// Lazy singleton: don't spawn the goroutine twice if Start is
 	// re-entered after a failover-triggered restart.
@@ -357,10 +361,9 @@ func (b *LocalBackend) runMeshFailoverWatchdog() {
 		// Hydrate from disk before the first probe tick so a cold
 		// start with a dead primary already has a peer list to
 		// rotate through. Idempotent — does nothing if a netmap
-		// already populated the in-memory list.
-		b.mu.Lock()
+		// already populated the in-memory list. b.mu is already
+		// held by the calling startLocked path.
 		b.hydrateMeshFromDisk()
-		b.mu.Unlock()
 
 		b.goTracker.Go(func() {
 			t := time.NewTicker(meshFailoverProbeInterval)
