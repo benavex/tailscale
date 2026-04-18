@@ -338,10 +338,18 @@ func (b *LocalBackend) maybeFollowCrownExitNode() {
 	}
 
 	b.logf("mesh: follow-crown rotating exit node to %q (crown=%q)", exitName, b.meshFailover.crown)
+	// Set AutoExitNodeSet=true alongside ExitNodeIDSet to keep AutoExitNode
+	// pinned to follow-crown. Upstream local.go:4592 ("Disable automatic
+	// exit node selection if the user explicitly sets ExitNodeID") would
+	// otherwise clear AutoExitNode every time we resolve the crown's
+	// declared exit node — defeating future rotations because the next
+	// watchdog tick would see prefs.AutoExitNode == "" and bail.
 	if _, err := b.EditPrefs(&ipn.MaskedPrefs{
-		ExitNodeIDSet: true,
+		ExitNodeIDSet:   true,
+		AutoExitNodeSet: true,
 		Prefs: ipn.Prefs{
-			ExitNodeID: target,
+			ExitNodeID:   target,
+			AutoExitNode: ipn.FollowCrownExitNode,
 		},
 	}); err != nil {
 		b.logf("mesh: follow-crown EditPrefs failed: %v", err)
