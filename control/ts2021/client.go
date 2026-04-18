@@ -134,18 +134,18 @@ func NewClient(opts ClientOpts) (*Client, error) {
 	addr, _ := netip.ParseAddr(u.Hostname())
 	isPrivateHost := addr.IsPrivate() || addr.IsLoopback() || u.Hostname() == "localhost"
 	if port := u.Port(); port != "" {
-		// If there is an explicit port specified, entirely rely on the scheme,
-		// unless it's http with a private host in which case we never try using HTTPS.
+		// If there is an explicit port specified, entirely rely on the scheme.
+		// For explicit http://host:port URLs we disable HTTPS entirely — fixes
+		// I-03: tailscale's force-443 cooldown (LastNoiseDialWasRecent) would
+		// otherwise redirect retries to TCP 443 after one failure, breaking
+		// the test rig's plain-HTTP-on-:8090 control endpoint for ~2 minutes.
+		// The user explicitly chose http+port; honor it and never fall back.
 		if u.Scheme == "https" {
 			httpPort = ""
 			httpsPort = port
 		} else if u.Scheme == "http" {
 			httpPort = port
-			httpsPort = "443"
-			if isPrivateHost {
-				logf("setting empty HTTPS port with http scheme and private host %s", u.Hostname())
-				httpsPort = ""
-			}
+			httpsPort = ""
 		}
 	} else if u.Scheme == "http" && isPrivateHost {
 		// Whenever the scheme is http and the hostname is an IP address, do not set the HTTPS port,
