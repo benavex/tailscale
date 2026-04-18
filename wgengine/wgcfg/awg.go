@@ -4,6 +4,7 @@
 package wgcfg
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +13,85 @@ import (
 	"github.com/amnezia-vpn/amneziawg-go/device"
 	"tailscale.com/types/logger"
 )
+
+// AWG parameter bounds — mirror of headscale's
+// types.AWGConfig.Validate() ranges. Enforced on the client so a
+// compromised control server cannot push wire-format-breaking or
+// fingerprintable values via the CapabilityAmneziaWG MapResponse
+// entry even after it has won the noise session.
+const (
+	awgMaxJc      = 128
+	awgMaxJSize   = 1280
+	awgMaxPadding = 1280
+)
+
+// ValidateAWGParams returns a non-nil error if any field in p is out
+// of the safe range. Zero-valued (unset) fields are ignored — the
+// merge logic in MergeAWGParams will fill them from env defaults.
+// Call this on params extracted from the CapabilityAmneziaWG netmap
+// entry before handing them to ApplyAWG.
+func ValidateAWGParams(p AWGParams) error {
+	if p.Jc != 0 && (p.Jc < 1 || p.Jc > awgMaxJc) {
+		return fmt.Errorf("jc=%d out of [1,%d]", p.Jc, awgMaxJc)
+	}
+	if p.Jmin != 0 && (p.Jmin < 1 || p.Jmin > awgMaxJSize) {
+		return fmt.Errorf("jmin=%d out of [1,%d]", p.Jmin, awgMaxJSize)
+	}
+	if p.Jmax != 0 {
+		if p.Jmax > awgMaxJSize {
+			return fmt.Errorf("jmax=%d exceeds %d", p.Jmax, awgMaxJSize)
+		}
+		// Only compare to jmin if it's also set. A CapMap payload that
+		// sets jmax alone is legal (env var supplies jmin at merge time).
+		if p.Jmin != 0 && p.Jmax < p.Jmin {
+			return fmt.Errorf("jmax=%d < jmin=%d", p.Jmax, p.Jmin)
+		}
+	}
+	for _, pair := range [...]struct {
+		name string
+		val  int
+	}{{"s1", p.S1}, {"s2", p.S2}, {"s3", p.S3}, {"s4", p.S4}} {
+		if pair.val < 0 || pair.val > awgMaxPadding {
+			return fmt.Errorf("%s=%d out of [0,%d]", pair.name, pair.val, awgMaxPadding)
+		}
+	}
+	for _, pair := range [...]struct {
+		name, val string
+	}{{"h1", p.H1}, {"h2", p.H2}, {"h3", p.H3}, {"h4", p.H4}} {
+		if pair.val == "" {
+			continue
+		}
+		if err := validateAWGMagicHeader(pair.val); err != nil {
+			return fmt.Errorf("%s: %w", pair.name, err)
+		}
+	}
+	return nil
+}
+
+// validateAWGMagicHeader parses a magic-header spec exactly as
+// amneziawg-go's newMagicHeader does: "N" or "N-M" where both are
+// uint32 and M >= N.
+func validateAWGMagicHeader(spec string) error {
+	parts := strings.Split(spec, "-")
+	if len(parts) < 1 || len(parts) > 2 {
+		return errors.New("bad format (want N or N-M)")
+	}
+	start, err := strconv.ParseUint(parts[0], 10, 32)
+	if err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	if len(parts) == 1 {
+		return nil
+	}
+	end, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return fmt.Errorf("end: %w", err)
+	}
+	if end < start {
+		return fmt.Errorf("end %d < start %d", end, start)
+	}
+	return nil
+}
 
 // AmneziaVPN client defaults, mirrored from
 // amnezia-client/client/protocols/protocols_defs.h (namespace protocols::awg).

@@ -301,6 +301,7 @@ change in the future.
 			systrayCmd,
 			appcRoutesCmd,
 			waitCmd,
+			meshCmd,
 		),
 		FlagSet: rootfs,
 		Exec: func(ctx context.Context, args []string) error {

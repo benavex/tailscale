@@ -13,6 +13,8 @@ on:
       - 'ipn/**'
       - 'control/**'
       - 'derp/**'
+      - 'client/**'
+      - 'types/**'
   workflow_dispatch:
 
 permissions:

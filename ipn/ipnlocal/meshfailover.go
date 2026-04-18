@@ -97,18 +97,50 @@ func (b *LocalBackend) maybeFailoverControlURL() {
 	// marked online, stay on the current URL — we have no evidence
 	// that any alternative is better, and rotating to a known-dead
 	// peer just stretches the outage.
+	//
+	// When the peer carries a cluster signature (server side has
+	// identity pinning configured), require it to verify against our
+	// pinned cluster key before accepting it as a rotation target. A
+	// peer that fails verification is skipped even if marked online;
+	// better to sit on an unreachable primary than fail over to an
+	// attacker-run sibling. When no pin exists and no peer carries a
+	// signature, rotation still works (legacy mode); when a pin exists
+	// but a candidate carries no signature, we refuse it.
+	// Pin-state corruption must fail CLOSED, not open. If a pin file
+	// exists but is unreadable or malformed, we cannot tell whether
+	// verification would have passed — so we refuse to rotate at all
+	// and let the operator fix the file. Only a genuinely absent pin
+	// file (nil, nil) allows legacy unpinned rotation.
+	pin, pinErr := b.loadClusterPin()
+	if pinErr != nil {
+		b.logf("mesh: cluster pin file corrupt (%v); refusing to rotate — fix or delete %s",
+			pinErr, b.clusterPinPath())
+		b.mu.Unlock()
+		return
+	}
+	pinPresent := pin != nil
 	var target nmcfg.MeshPeer
+	var skipped int
 	for i := 0; i < len(mf.peers); i++ {
 		candidate := mf.peers[(mf.rotateIdx+i)%len(mf.peers)]
 		if candidate.URL == "" || !candidate.Online {
 			continue
+		}
+		if pinPresent {
+			if err := b.verifyPeerAgainstPin(candidate); err != nil {
+				b.logf("mesh: refusing rotation to %q (%s): %v",
+					candidate.URL, candidate.Name, err)
+				skipped++
+				continue
+			}
 		}
 		target = candidate
 		mf.rotateIdx = (mf.rotateIdx + i + 1) % len(mf.peers)
 		break
 	}
 	if target.URL == "" {
-		b.logf("mesh: no online peer to rotate to; staying on %q", b.pm.CurrentPrefs().ControlURL())
+		b.logf("mesh: no eligible peer to rotate to (skipped %d unverified); staying on %q",
+			skipped, b.pm.CurrentPrefs().ControlURL())
 		b.mu.Unlock()
 		return
 	}

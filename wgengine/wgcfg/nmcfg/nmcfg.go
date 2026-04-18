@@ -41,6 +41,17 @@ type MeshPeer struct {
 	Online        bool    `json:"online"`
 	UptimeSeconds float64 `json:"uptime_seconds"`
 	Score         float64 `json:"score"`
+
+	// NoisePubHex is this peer's noise protocol pubkey, hex-encoded.
+	// Populated when the cluster uses identity pinning. Empty in
+	// legacy single-server or secret-less deployments.
+	NoisePubHex string `json:"noise_pub,omitempty"`
+
+	// ClusterSigHex is ed25519.Sign(cluster_priv, NoisePubHex-bytes).
+	// The client refuses to rotate ControlURL to this peer unless the
+	// pair (NoisePubHex, ClusterSigHex) verifies under the pinned
+	// cluster pubkey.
+	ClusterSigHex string `json:"cluster_sig,omitempty"`
 }
 
 // MeshSnapshot is the payload of [CapabilityMesh]. Mirrors
@@ -124,10 +135,19 @@ func WGCfg(pk key.NodePrivate, nm *netmap.NetworkMap, logf logger.Logf, flags ne
 		// values, netmap wins (server is the source of truth); zero-valued
 		// fields in the cap fall back to the env var equivalent so the
 		// operator can override individual keys locally.
+		//
+		// Range-check every field before accepting. A compromised control
+		// server that has won the noise session could otherwise push
+		// fingerprintable or pathological values (Jc=10000, S1=1MB) here;
+		// rejecting the whole cap is safer than partial application.
 		if vals, err := tailcfg.UnmarshalNodeCapViewJSON[wgcfg.AWGParams](nm.SelfNode.CapMap(), CapabilityAmneziaWG); err != nil {
 			logf("[v1] wgcfg: ignoring malformed %s cap: %v", CapabilityAmneziaWG, err)
 		} else if len(vals) > 0 {
-			cfg.AWG = wgcfg.MergeAWGParams(vals[0], wgcfg.AWGParamsFromEnv())
+			if err := wgcfg.ValidateAWGParams(vals[0]); err != nil {
+				logf("[v1] wgcfg: rejecting out-of-range %s cap: %v", CapabilityAmneziaWG, err)
+			} else {
+				cfg.AWG = wgcfg.MergeAWGParams(vals[0], wgcfg.AWGParamsFromEnv())
+			}
 		}
 
 		// Log the mesh view whenever a netmap arrives carrying it. The

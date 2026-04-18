@@ -697,6 +697,37 @@ func (lc *Client) IDToken(ctx context.Context, aud string) (*tailcfg.TokenRespon
 	return decodeJSON[*tailcfg.TokenResponse](body)
 }
 
+// ClusterPin performs the one-time first-contact flow for a headscale
+// mesh with cluster identity pinning enabled. The daemon fetches
+// /mesh/identity at bootstrapURL, checks that its 8-character verifier
+// matches the one supplied by the user (defeats DNS poisoning of the
+// bootstrap hostname), validates the ed25519 signature over the
+// server's noise pubkey, and persists the cluster pubkey to varRoot.
+//
+// Returns the canonical cluster pubkey + verifier on success. Returns
+// a descriptive error when the verifier mismatches, the signature is
+// bad, or the bootstrap server has no cluster identity configured.
+func (lc *Client) ClusterPin(ctx context.Context, bootstrapURL, verifier string) (*ClusterPinResult, error) {
+	body := jsonBody(struct {
+		BootstrapURL string `json:"bootstrap_url"`
+		Verifier     string `json:"verifier"`
+	}{
+		BootstrapURL: bootstrapURL,
+		Verifier:     verifier,
+	})
+	raw, err := lc.send(ctx, "POST", "/localapi/v0/cluster-pin", 200, body)
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[*ClusterPinResult](raw)
+}
+
+// ClusterPinResult is returned by [Client.ClusterPin].
+type ClusterPinResult struct {
+	Verifier   string `json:"verifier"`
+	ClusterPub string `json:"cluster_pub"`
+}
+
 // WaitingFiles returns the list of received Taildrop files that have been
 // received by the Tailscale daemon in its staging/cache directory but not yet
 // transferred by the user's CLI or GUI client and written to a user's home
