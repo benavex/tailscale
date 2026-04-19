@@ -5366,6 +5366,12 @@ func (b *LocalBackend) SetTCPHandlerForFunnelFlow(h func(src netip.AddrPort, dst
 // It should only be called before the LocalBackend is used.
 func (b *LocalBackend) SetVarRoot(dir string) {
 	b.varRoot = dir
+	// clusterpin.json lives under varRoot, so the SPKI-pin install
+	// has to run *after* this assignment to read the right path.
+	// NewLocalBackend also calls installClusterSPKIPin at end-of-init
+	// as a belt-and-braces for callers that pre-set varRoot through
+	// other mechanisms; the function is idempotent.
+	b.installClusterSPKIPin()
 }
 
 // SetLogFlusher sets a func to be called to flush log uploads.
