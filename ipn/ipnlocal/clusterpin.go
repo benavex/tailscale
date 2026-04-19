@@ -18,6 +18,7 @@
 package ipnlocal
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base32"
@@ -28,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"tailscale.com/net/tlsdial"
 	"tailscale.com/wgengine/wgcfg/nmcfg"
 )
 
@@ -36,11 +38,21 @@ import (
 // user accounts must not drop the trust anchor.
 const clusterPinFile = "clusterpin.json"
 
-// clusterPin is the on-disk record. Only the cluster pubkey is
-// load-bearing; the verifier string is stored purely for debugging.
+// clusterPin is the on-disk record.
+//
+//   - ClusterPubHex pins the cluster ed25519 signing key; every sibling
+//     control server's noise pubkey must carry a valid cluster signature.
+//   - TLSSPKIHex pins the SHA-256 of the cluster TLS cert's
+//     SubjectPublicKeyInfo (empty on pins written before Phase B —
+//     treated as "cert trust only via system store" for back-compat,
+//     but the intended path is to re-pin via the first-contact flow to
+//     capture it).
+//   - Verifier is stored purely for diagnostics; authoritative check is
+//     always re-derived from ClusterPubHex.
 type clusterPin struct {
 	ClusterPubHex string `json:"cluster_pub"`
 	Verifier      string `json:"verifier"`
+	TLSSPKIHex    string `json:"tls_spki,omitempty"`
 }
 
 // clusterPinPath returns the absolute path where the pin is stored for
@@ -79,12 +91,16 @@ func (b *LocalBackend) loadClusterPin() (*clusterPin, error) {
 	return &pin, nil
 }
 
-// WriteClusterPin records the cluster pubkey + verifier. Idempotent:
-// overwriting with the same pub+verifier is a no-op; overwriting with
-// a different pub returns an error so an operator sees an explicit
-// "pin mismatch" rather than silent re-pinning. To force a change, the
-// user must delete the file out of band (documented as a factory reset).
-func (b *LocalBackend) WriteClusterPin(clusterPubHex, verifier string) error {
+// WriteClusterPin records the cluster pubkey + verifier + TLS SPKI.
+// Idempotent: overwriting with the same pub+SPKI is a no-op; a different
+// pub returns an error ("pin mismatch") so an operator sees an explicit
+// rejection rather than silent re-pinning. To force a change, the user
+// deletes the file out of band (factory-reset escape hatch). Callers
+// may pass tlsSPKIHex == "" to write a legacy pin (back-compat with
+// pre-Phase-B servers that did not publish tls_spki); on re-contact
+// with a newer server that does publish it, the pin is promoted in
+// place via a same-pubkey write so the SPKI gets captured.
+func (b *LocalBackend) WriteClusterPin(clusterPubHex, verifier, tlsSPKIHex string) error {
 	path := b.clusterPinPath()
 	if path == "" {
 		return errors.New("no var root configured; cannot persist cluster pin")
@@ -93,19 +109,39 @@ func (b *LocalBackend) WriteClusterPin(clusterPubHex, verifier string) error {
 		return fmt.Errorf("cluster pubkey hex decodes to %d bytes, want %d",
 			len(got), ed25519.PublicKeySize)
 	}
-	if existing, err := b.loadClusterPin(); err != nil {
+	if tlsSPKIHex != "" {
+		if got, _ := hex.DecodeString(tlsSPKIHex); len(got) != sha256.Size {
+			return fmt.Errorf("tls_spki hex decodes to %d bytes, want %d",
+				len(got), sha256.Size)
+		}
+	}
+	existing, err := b.loadClusterPin()
+	if err != nil {
 		return err
-	} else if existing != nil {
-		if existing.ClusterPubHex == clusterPubHex {
+	}
+	if existing != nil {
+		if existing.ClusterPubHex != clusterPubHex {
+			return fmt.Errorf("cluster pin mismatch: pinned=%s attempted=%s (factory-reset to change)",
+				existing.Verifier, verifier)
+		}
+		// Same pub. Promote to include TLS SPKI if a fresher server
+		// supplied one and the old pin was silent on it — the whole
+		// point of re-pinning here is to catch Phase-B capable
+		// clusters without forcing a factory-reset.
+		if existing.TLSSPKIHex == tlsSPKIHex {
 			return nil
 		}
-		return fmt.Errorf("cluster pin mismatch: pinned=%s attempted=%s (factory-reset to change)",
-			existing.Verifier, verifier)
+		if existing.TLSSPKIHex != "" && tlsSPKIHex != "" &&
+			existing.TLSSPKIHex != tlsSPKIHex {
+			return fmt.Errorf("cluster TLS SPKI mismatch: pinned=%s attempted=%s (factory-reset to change)",
+				existing.TLSSPKIHex, tlsSPKIHex)
+		}
 	}
 	tmp := path + ".tmp"
 	raw, err := json.MarshalIndent(clusterPin{
 		ClusterPubHex: clusterPubHex,
 		Verifier:      verifier,
+		TLSSPKIHex:    tlsSPKIHex,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -116,8 +152,40 @@ func (b *LocalBackend) WriteClusterPin(clusterPubHex, verifier string) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("rename cluster pin: %w", err)
 	}
-	b.logf("mesh: cluster pinned with verifier %s", verifier)
+	if tlsSPKIHex != "" {
+		b.logf("mesh: cluster pinned with verifier %s + TLS SPKI", verifier)
+	} else {
+		b.logf("mesh: cluster pinned with verifier %s (no TLS SPKI — server is pre-Phase-B)", verifier)
+	}
+	// Reinstall the tlsdial hook so control / DERP dials accept
+	// the pinned cert without a system trust-store entry.
+	b.installClusterSPKIPin()
 	return nil
+}
+
+// installClusterSPKIPin wires the TLS SPKI pin into tlsdial. Called at
+// backend startup after the pin is loaded, and after every successful
+// WriteClusterPin. A no-op when no pin is present or the pin predates
+// Phase B (TLSSPKIHex empty).
+func (b *LocalBackend) installClusterSPKIPin() {
+	pin, err := b.loadClusterPin()
+	if err != nil || pin == nil || pin.TLSSPKIHex == "" {
+		tlsdial.SetSPKIPinMatch(nil)
+		return
+	}
+	want, err := hex.DecodeString(pin.TLSSPKIHex)
+	if err != nil || len(want) != sha256.Size {
+		tlsdial.SetSPKIPinMatch(nil)
+		return
+	}
+	// Copy into a local to keep the predicate immutable against
+	// later mutations of the pin file until the next explicit
+	// reinstall.
+	fixed := append([]byte(nil), want...)
+	tlsdial.SetSPKIPinMatch(func(got []byte) bool {
+		return bytes.Equal(got, fixed)
+	})
+	b.logf("mesh: tlsdial SPKI pin installed (%s…)", pin.TLSSPKIHex[:16])
 }
 
 // verifyPeerAgainstPin returns nil iff the peer's NoisePubHex is signed

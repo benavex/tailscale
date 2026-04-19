@@ -39,6 +39,46 @@ var counterFallbackOK int32 // atomic
 
 var debug = envknob.RegisterBool("TS_DEBUG_TLS_DIAL")
 
+// spkiPinMatch, if non-nil, is consulted first during TLS verification.
+// A true return causes tlsdial to accept the peer cert without running
+// x509 chain or hostname verification. Wired to the mesh cluster-pin
+// flow so clients can trust the cluster's self-signed cert — same on
+// every sibling, derived from cluster_secret — via an SPKI hash
+// recorded during first-contact pinning, without needing the cert
+// itself in the system trust store.
+//
+// A false return falls through to standard chain + hostname verification,
+// so setting a pin does not break dials to public hosts (logs, non-
+// clustered DERP, etc.): those just don't match the SPKI and use the
+// normal path.
+var spkiPinMatch atomic.Pointer[func([]byte) bool]
+
+// SetSPKIPinMatch installs a cert-SPKI acceptance predicate. The
+// predicate receives the SHA-256 of the peer leaf cert's
+// SubjectPublicKeyInfo and returns true to accept, false to defer to
+// standard verification. Passing nil clears any previously-set pin.
+// Intended to be called once at LocalBackend startup after the
+// cluster pin loads from disk.
+func SetSPKIPinMatch(fn func(spkiSHA256 []byte) bool) {
+	if fn == nil {
+		spkiPinMatch.Store(nil)
+		return
+	}
+	spkiPinMatch.Store(&fn)
+}
+
+// verifyBySPKIPin returns true iff the installed pin accepts the first
+// peer cert's SPKI. When no pin is installed, returns false so the
+// standard verification path runs.
+func verifyBySPKIPin(cs tls.ConnectionState) bool {
+	fnp := spkiPinMatch.Load()
+	if fnp == nil || len(cs.PeerCertificates) == 0 {
+		return false
+	}
+	sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
+	return (*fnp)(sum[:])
+}
+
 // tlsdialWarningPrinted tracks whether we've printed a warning about a given
 // hostname already, to avoid log spam for users with custom DERP servers,
 // Headscale, etc.
@@ -114,6 +154,18 @@ func Config(ht *health.Tracker, base *tls.Config) *tls.Config {
 	conf.InsecureSkipVerify = true
 	conf.VerifyConnection = func(cs tls.ConnectionState) (retErr error) {
 		dialedHost := cs.ServerName
+
+		// Cluster SPKI pin short-circuit: if the operator has pinned a
+		// cluster cert SPKI (mesh first-contact) and the peer cert
+		// matches, accept without chain/hostname verification. Falls
+		// through on non-match so dials to public hosts (logs, public
+		// DERP) still run the standard path.
+		if verifyBySPKIPin(cs) {
+			if debug() {
+				log.Printf("tlsdial(spki-pin %q): accepted", dialedHost)
+			}
+			return nil
+		}
 
 		if dialedHost == "log.tailscale.com" && hostinfo.IsNATLabGuestVM() {
 			// Allow log.tailscale.com TLS MITM for integration tests when

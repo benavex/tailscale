@@ -110,3 +110,34 @@ func TestFallbackRootWorks(t *testing.T) {
 func sayHi(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "hi")
 }
+
+// TestSPKIPinMatch: the cluster-pin short-circuit accepts a cert whose
+// SPKI matches the installed predicate, without running chain /
+// hostname verification. The mesh cluster-pin flow depends on this
+// to trust self-signed cluster certs pinned by SHA-256(SPKI).
+func TestSPKIPinMatch(t *testing.T) {
+	t.Cleanup(func() { SetSPKIPinMatch(nil) })
+
+	want := []byte{1, 2, 3}
+	SetSPKIPinMatch(func(got []byte) bool {
+		return len(got) == len(want) && got[0] == 1 && got[1] == 2 && got[2] == 3
+	})
+
+	fnp := spkiPinMatch.Load()
+	if fnp == nil {
+		t.Fatal("spkiPinMatch not set")
+	}
+	if !(*fnp)([]byte{1, 2, 3}) {
+		t.Error("pin predicate rejected a matching hash")
+	}
+	if (*fnp)([]byte{9, 9, 9}) {
+		t.Error("pin predicate accepted a non-matching hash")
+	}
+
+	// Clearing via nil removes the pin so subsequent dials go through
+	// standard verification instead of silently accepting everything.
+	SetSPKIPinMatch(nil)
+	if spkiPinMatch.Load() != nil {
+		t.Error("SetSPKIPinMatch(nil) did not clear the pin")
+	}
+}

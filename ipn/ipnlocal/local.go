@@ -639,6 +639,11 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	eventbus.SubscribeFunc(ec, b.onAppConnectorStoreRoutes)
 	mConn.SetNetInfoCallback(b.setNetInfo) // TODO(tailscale/tailscale#17887): move to eventbus
 
+	// Install the cluster TLS SPKI pin (if present on disk) before
+	// the first control / DERP dial fires. A no-op when no pin exists
+	// yet — standard tlsdial behaviour applies.
+	b.installClusterSPKIPin()
+
 	return b, nil
 }
 

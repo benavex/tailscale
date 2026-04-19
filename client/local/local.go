@@ -722,10 +722,14 @@ func (lc *Client) ClusterPin(ctx context.Context, bootstrapURL, verifier string)
 	return decodeJSON[*ClusterPinResult](raw)
 }
 
-// ClusterPinResult is returned by [Client.ClusterPin].
+// ClusterPinResult is returned by [Client.ClusterPin]. TLSSPKI is the
+// SHA-256 of the cluster TLS cert's SubjectPublicKeyInfo, hex-encoded;
+// empty when the pinned server predates Phase B and does not publish
+// tls_spki at /mesh/identity.
 type ClusterPinResult struct {
 	Verifier   string `json:"verifier"`
 	ClusterPub string `json:"cluster_pub"`
+	TLSSPKI    string `json:"tls_spki,omitempty"`
 }
 
 // WaitingFiles returns the list of received Taildrop files that have been

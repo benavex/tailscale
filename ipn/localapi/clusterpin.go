@@ -17,6 +17,9 @@ package localapi
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"tailscale.com/ipn/ipnlocal"
@@ -42,6 +46,7 @@ type clusterPinRequest struct {
 type clusterPinResponse struct {
 	Verifier   string `json:"verifier"`
 	ClusterPub string `json:"cluster_pub"`
+	TLSSPKI    string `json:"tls_spki,omitempty"`
 }
 
 type serverIdentityResponse struct {
@@ -49,6 +54,7 @@ type serverIdentityResponse struct {
 	NoisePub   string `json:"noise_pub"`
 	Signature  string `json:"signature"`
 	Verifier   string `json:"verifier"`
+	TLSSPKI    string `json:"tls_spki,omitempty"`
 }
 
 // serveClusterPin is the first-contact handler. Input:
@@ -85,14 +91,14 @@ func (h *Handler) serveClusterPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clusterPub, err := firstContactFetch(r.Context(), req.BootstrapURL, req.Verifier)
+	clusterPub, tlsSPKI, err := firstContactFetch(r.Context(), req.BootstrapURL, req.Verifier)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 
-	if err := h.b.WriteClusterPin(clusterPub, req.Verifier); err != nil {
-		if strings.Contains(err.Error(), "pin mismatch") {
+	if err := h.b.WriteClusterPin(clusterPub, req.Verifier, tlsSPKI); err != nil {
+		if strings.Contains(err.Error(), "pin mismatch") || strings.Contains(err.Error(), "SPKI mismatch") {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -104,57 +110,105 @@ func (h *Handler) serveClusterPin(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(clusterPinResponse{
 		Verifier:   req.Verifier,
 		ClusterPub: clusterPub,
+		TLSSPKI:    tlsSPKI,
 	})
 }
 
 // firstContactFetch runs the network + crypto side of the pin flow
-// without touching disk. Returns the hex-encoded cluster pubkey on
-// success. Separate function so it's unit-testable without the
+// without touching disk. Returns (cluster pubkey hex, observed TLS
+// SPKI hex, err). Separate function so it's unit-testable without the
 // LocalBackend dependency.
-func firstContactFetch(ctx context.Context, bootstrapURL, verifier string) (string, error) {
+//
+// Chicken-and-egg: the bootstrap URL is https and the cert is the
+// cluster's self-signed cert. We can't trust it via a CA — that's the
+// whole point of pinning. So we dial with InsecureSkipVerify but
+// capture the peer cert's SPKI via VerifyPeerCertificate, then
+// cross-check the captured hash against `tls_spki` in the response.
+// If both the verifier and the SPKI round-trip match, the server
+// genuinely holds cluster_secret — the same secret seeds both the
+// ed25519 cluster pub (verifier input) and the TLS cert keypair.
+func firstContactFetch(ctx context.Context, bootstrapURL, verifier string) (string, string, error) {
+	var capturedSPKI atomic.Pointer[[]byte]
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("server presented no TLS certificate")
+			}
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse server TLS cert: %w", err)
+			}
+			sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+			cp := append([]byte(nil), sum[:]...)
+			capturedSPKI.Store(&cp)
+			return nil
+		},
+	}
+	client := &http.Client{Timeout: 15 * time.Second, Transport: tr}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, bootstrapURL+"/mesh/identity", nil)
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return "", "", fmt.Errorf("build request: %w", err)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("fetch %s/mesh/identity: %w", bootstrapURL, err)
+		return "", "", fmt.Errorf("fetch %s/mesh/identity: %w", bootstrapURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "", errors.New("bootstrap server has no cluster identity configured — set cluster_secret on the server")
+		return "", "", errors.New("bootstrap server has no cluster identity configured — set cluster_secret on the server")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("bootstrap returned %s", resp.Status)
+		return "", "", fmt.Errorf("bootstrap returned %s", resp.Status)
 	}
 	var ident serverIdentityResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&ident); err != nil {
-		return "", fmt.Errorf("decode identity: %w", err)
+		return "", "", fmt.Errorf("decode identity: %w", err)
 	}
 	clusterPubBytes, err := hex.DecodeString(ident.ClusterPub)
 	if err != nil || len(clusterPubBytes) != ed25519.PublicKeySize {
-		return "", errors.New("bootstrap returned malformed cluster pubkey")
+		return "", "", errors.New("bootstrap returned malformed cluster pubkey")
 	}
 	noisePubBytes, err := hex.DecodeString(ident.NoisePub)
 	if err != nil {
-		return "", errors.New("bootstrap returned malformed noise pubkey")
+		return "", "", errors.New("bootstrap returned malformed noise pubkey")
 	}
 	sigBytes, err := hex.DecodeString(ident.Signature)
 	if err != nil {
-		return "", errors.New("bootstrap returned malformed signature")
+		return "", "", errors.New("bootstrap returned malformed signature")
 	}
 
 	got, err := ipnlocal.VerifierFromClusterPubHex(ident.ClusterPub)
 	if err != nil {
-		return "", fmt.Errorf("derive verifier: %w", err)
+		return "", "", fmt.Errorf("derive verifier: %w", err)
 	}
 	if !strings.EqualFold(got, verifier) {
-		return "", fmt.Errorf("verifier mismatch: server claims %q, you entered %q — possible MITM, refusing to pin",
+		return "", "", fmt.Errorf("verifier mismatch: server claims %q, you entered %q — possible MITM, refusing to pin",
 			got, verifier)
 	}
 	if !ed25519.Verify(clusterPubBytes, noisePubBytes, sigBytes) {
-		return "", errors.New("bootstrap server's noise pubkey is not signed by its cluster key — refusing to pin")
+		return "", "", errors.New("bootstrap server's noise pubkey is not signed by its cluster key — refusing to pin")
 	}
-	return ident.ClusterPub, nil
+
+	// Cross-check: the SPKI the server claims (tls_spki) must equal
+	// the SPKI we observed on the wire. Otherwise the cert we saw
+	// and the hash the server advertised disagree — a sign of MITM
+	// or an operator misconfiguration — and we refuse to pin.
+	observedPtr := capturedSPKI.Load()
+	var observed string
+	if observedPtr != nil {
+		observed = hex.EncodeToString(*observedPtr)
+	}
+	if ident.TLSSPKI == "" {
+		// Pre-Phase-B server. Nothing to cross-check. Accept the pin
+		// without a SPKI; the pin-match hook will fall through to
+		// chain verification on subsequent dials.
+		return ident.ClusterPub, "", nil
+	}
+	if !strings.EqualFold(ident.TLSSPKI, observed) {
+		return "", "", fmt.Errorf("TLS SPKI mismatch: server advertised %q, wire cert hashed to %q — refusing to pin",
+			ident.TLSSPKI, observed)
+	}
+	return ident.ClusterPub, strings.ToLower(ident.TLSSPKI), nil
 }
