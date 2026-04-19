@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+	"tailscale.com/ipn"
+	"tailscale.com/ipn/mesh/invite"
 )
 
 // meshCmd groups user-facing commands for the benavex fork's mesh-VPN
@@ -20,14 +22,65 @@ var meshCmd = &ffcli.Command{
 	ShortUsage: "tailscale mesh <subcommand>",
 	ShortHelp:  "Manage trust in a headscale mesh with cluster identity pinning",
 	LongHelp: strings.TrimSpace(`
-Mesh-specific subcommands. Currently:
+Mesh-specific subcommands.
 
-  pin       First-contact pin a headscale mesh against an 8-character verifier.
+  join      One-shot first-run: decode a vpn:// invite, pin, and log in.
+  pin       Lower-level: first-contact pin against a verifier only.
 `),
 	Exec: func(ctx context.Context, args []string) error {
 		return errors.New("usage: tailscale mesh <subcommand>; see --help")
 	},
-	Subcommands: []*ffcli.Command{meshPinCmd},
+	Subcommands: []*ffcli.Command{meshJoinCmd, meshPinCmd},
+}
+
+var meshJoinCmd = &ffcli.Command{
+	Name:       "join",
+	ShortUsage: "tailscale mesh join <invite>",
+	ShortHelp:  "First-run join using a single vpn:// invite string",
+	LongHelp: strings.TrimSpace(`
+Decode a vpn:// invite minted by the operator (see "headscale mesh
+user-invite" on the server side) and run the full first-contact
+sequence in one shot:
+
+  1. Pin the cluster identity (verifier cross-check).
+  2. Set ControlURL + follow-crown exit-node policy.
+  3. Start tailscaled with the embedded pre-auth key.
+
+The invite string tolerates whitespace and line wrapping — paste it
+verbatim even if your terminal broke it across lines.
+`),
+	Exec: runMeshJoin,
+}
+
+func runMeshJoin(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: tailscale mesh join <invite>")
+	}
+	// Join all args in case the shell split the invite on whitespace
+	// (e.g. user pasted a multi-line blob without quotes).
+	raw := strings.Join(args, " ")
+	inv, err := invite.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse invite: %w", err)
+	}
+
+	if _, err := localClient.ClusterPin(ctx, inv.URL, inv.Verifier); err != nil {
+		return fmt.Errorf("cluster pin failed: %w", err)
+	}
+	printf("pinned cluster (verifier %s)\n", inv.Verifier)
+
+	prefs := ipn.NewPrefs()
+	prefs.ControlURL = inv.URL
+	prefs.WantRunning = true
+	prefs.AutoExitNode = "follow-crown"
+	if err := localClient.Start(ctx, ipn.Options{
+		UpdatePrefs: prefs,
+		AuthKey:     inv.AuthKey,
+	}); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	outln("logged in; tailscaled will come up in a few seconds.")
+	return nil
 }
 
 var meshPinCmd = &ffcli.Command{
