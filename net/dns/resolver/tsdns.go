@@ -327,6 +327,15 @@ func (r *Resolver) Query(ctx context.Context, bs []byte, family string, from net
 	default:
 	}
 
+	// benavex fork: log every query hitting tsdns so we can tell, on
+	// Android-15 inclusive split-tunnel, whether the selected app's
+	// DNS packets are even reaching the tun.
+	if resp := parseExitNodeQuery(bs); resp != nil && resp.Question.Name.String() != "" {
+		r.logf("dns: Query from=%v family=%s name=%q type=%v", from, family, resp.Question.Name.String(), resp.Question.Type)
+	} else {
+		r.logf("dns: Query from=%v family=%s (unparseable or empty)", from, family)
+	}
+
 	out, err := r.respond(bs)
 	if err == errNotOurName {
 		responses := make(chan packet, 1)
